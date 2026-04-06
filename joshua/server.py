@@ -183,9 +183,14 @@ def start_sprint(req: StartSprintRequest):
             detail={"message": "Config validation failed", "errors": errors}
         )
 
-    # Validate project path exists on disk
+    # Validate project path — required, must exist on disk
     project_path = config.get("project", {}).get("path", "")
-    if project_path and not Path(project_path).is_dir():
+    if not project_path:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "project.path is required"}
+        )
+    if not Path(project_path).is_dir():
         raise HTTPException(
             status_code=422,
             detail={"message": f"project.path does not exist: {project_path}"}
@@ -219,15 +224,15 @@ def start_sprint(req: StartSprintRequest):
     if req.callback_url:
         sprint.on_cycle_complete = _make_callback(req.callback_url)
 
+    # Create entry first so thread receives it directly — no _args mutation hack
+    entry = SprintEntry(sprint_id, sprint, None, config)
     thread = threading.Thread(
         target=_run_sprint_thread,
-        args=(None,),  # placeholder, set below
+        args=(entry,),
         daemon=True,
         name=f"sprint-{sprint_id}",
     )
-
-    entry = SprintEntry(sprint_id, sprint, thread, config)
-    thread._args = (entry,)  # fix circular ref
+    entry.thread = thread
 
     with _lock:
         _registry[sprint_id] = entry

@@ -24,6 +24,10 @@ ALLOWED_COMMANDS = {
     "flyctl", "heroku", "vercel", "railway",
 }
 
+# Shell interpreters that accept -c <string> — must not be used that way
+# (equivalent to shell=True). Only allow them to run script files.
+_SHELL_INTERPRETERS = {"bash", "sh", "zsh", "fish"}
+
 # Patterns that look like secrets in env vars — redact from logs
 _SECRET_PATTERN = re.compile(
     r"(TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY|AUTH|CREDENTIAL)",
@@ -64,6 +68,15 @@ def _safe_parse(cmd: str) -> list[str]:
             f"Command '{first}' is not in the allowed list. "
             f"Allowed: {sorted(ALLOWED_COMMANDS)}. "
             "Use a full path or add your tool to JOSHUA_ALLOWED_COMMANDS env var."
+        )
+
+    # Block shell interpreters invoked with -c (equivalent to shell=True)
+    # Allow: bash ./deploy.sh, sh /opt/run.sh
+    # Reject: bash -c "...", sh -c "..."
+    if first in _SHELL_INTERPRETERS and len(args) > 1 and args[1] == "-c":
+        raise ValueError(
+            f"'{first} -c' is not allowed — it is equivalent to shell=True. "
+            "Put your commands in a script file and run: bash ./your-script.sh"
         )
 
     return args
