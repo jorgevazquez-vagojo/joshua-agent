@@ -19,12 +19,13 @@ class TestAgent:
         assert agent.verdict_format is True
 
     def test_get_task_round_robin(self):
+        # Cycles are 1-based; cycle 1 → tasks[0], cycle 2 → tasks[1], etc.
         agent = Agent(name="dev", skill="dev", tasks=["a", "b", "c"])
-        assert agent.get_task(0) == "a"
-        assert agent.get_task(1) == "b"
-        assert agent.get_task(2) == "c"
-        assert agent.get_task(3) == "a"  # wraps around
-        assert agent.get_task(100) == "b"  # 100 % 3 == 1
+        assert agent.get_task(1) == "a"
+        assert agent.get_task(2) == "b"
+        assert agent.get_task(3) == "c"
+        assert agent.get_task(4) == "a"  # wraps around
+        assert agent.get_task(101) == "b"  # (101-1) % 3 == 1
 
     def test_get_task_empty_list(self):
         agent = Agent(name="dev", skill="dev", tasks=[])
