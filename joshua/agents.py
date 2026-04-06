@@ -101,7 +101,7 @@ class Agent:
         """Get the task for a given cycle number (round-robin)."""
         if not self.tasks:
             return f"General {self.skill} review and improvement"
-        return self.tasks[cycle % len(self.tasks)]
+        return self.tasks[(cycle - 1) % len(self.tasks)]
 
 
 # ── Built-in skill templates ─────────────────────────────────────

@@ -138,10 +138,7 @@ def _make_callback(callback_url: str):
 
     def callback(cycle_data: dict):
         try:
-            headers = {}
-            if INTERNAL_TOKEN:
-                headers["X-Internal-Token"] = INTERNAL_TOKEN
-            req.post(callback_url, json=cycle_data, headers=headers, timeout=10)
+            req.post(callback_url, json=cycle_data, timeout=10)
         except Exception as e:
             log.warning(f"Callback to {callback_url} failed: {e}")
 

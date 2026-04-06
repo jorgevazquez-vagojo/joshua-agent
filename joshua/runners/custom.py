@@ -1,5 +1,6 @@
 """Custom command template runner."""
 
+import shlex
 import subprocess
 import time
 from pathlib import Path
@@ -73,8 +74,7 @@ class CustomRunner(LLMRunner):
 
             start = time.monotonic()
             result = subprocess.run(
-                cmd,
-                shell=True,
+                shlex.split(cmd),
                 capture_output=True,
                 text=True,
                 timeout=timeout,

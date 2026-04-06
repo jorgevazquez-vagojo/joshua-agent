@@ -43,16 +43,20 @@ class GitOps:
 
         Returns branch name if created successfully, None otherwise.
         """
+        stashed = False
         try:
             # Stash any uncommitted changes first
             if not self.is_clean():
                 self._run("stash", "--include-untracked")
+                stashed = True
 
             self._run("checkout", "-b", branch_name)
             log.info(f"Created snapshot branch: {branch_name}")
             return branch_name
         except subprocess.CalledProcessError as e:
             log.error(f"Failed to create snapshot: {e.stderr}")
+            if stashed:
+                self._run("stash", "pop", check=False)
             return None
 
     def detect_main_branch(self) -> str:
