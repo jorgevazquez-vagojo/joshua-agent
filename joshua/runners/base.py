@@ -1,7 +1,9 @@
-"""Base LLM Runner interface."""
-
-import time
 import logging
+import os
+import signal
+import subprocess
+import threading
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional
@@ -21,7 +23,7 @@ class RunResult:
     exit_code: int
     duration_seconds: float
     error: Optional[str] = None
-    error_type: Optional[str] = None  # "timeout" | "binary_not_found" | "rate_limit" | "error"
+    error_type: Optional[str] = None  # "timeout" | "binary_not_found" | "rate_limit" | "cancelled" | "error"
     metadata: dict = field(default_factory=dict)
 
     def __bool__(self) -> bool:
@@ -50,6 +52,9 @@ class LLMRunner(ABC):
         self.timeout = config.get("timeout", 1800)
         self._rpm = config.get("requests_per_minute", 0)  # 0 = unlimited
         self._last_request_time: float = 0.0
+        self._active_process: subprocess.Popen[str] | None = None
+        self._process_lock = threading.Lock()
+        self._cancel_requested = False
 
     def _rate_limit(self):
         """Block until rate limit allows next request."""
@@ -62,6 +67,111 @@ class LLMRunner(ABC):
             log.debug(f"Rate limit: waiting {wait:.1f}s (limit: {self._rpm} rpm)")
             time.sleep(wait)
         self._last_request_time = time.monotonic()
+
+    def cancel(self):
+        """Cancel the currently running subprocess, if any."""
+        self._cancel_requested = True
+        with self._process_lock:
+            process = self._active_process
+        if process is not None:
+            self._terminate_process(process)
+
+    def _terminate_process(self, process: subprocess.Popen[str]):
+        """Terminate a running process, including its process group when possible."""
+        if process.poll() is not None:
+            return
+        try:
+            if os.name != "nt":
+                os.killpg(process.pid, signal.SIGTERM)
+            else:
+                process.terminate()
+        except ProcessLookupError:
+            return
+        except OSError:
+            process.terminate()
+
+    def _run_command(
+        self,
+        cmd: list[str],
+        cwd: str,
+        timeout: int,
+        success_requires_output: bool = False,
+        binary_not_found_message: str | None = None,
+    ) -> RunResult:
+        """Run a subprocess with cancellation support."""
+        start = time.monotonic()
+        if self._cancel_requested:
+            return RunResult(
+                success=False,
+                output="",
+                exit_code=-1,
+                duration_seconds=0,
+                error="Cancelled before start",
+                error_type="cancelled",
+            )
+
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=cwd,
+                start_new_session=(os.name != "nt"),
+            )
+        except FileNotFoundError:
+            return RunResult(
+                success=False,
+                output="",
+                exit_code=-1,
+                duration_seconds=0,
+                error=binary_not_found_message or f"Binary not found: {cmd[0]}",
+                error_type="binary_not_found",
+            )
+
+        with self._process_lock:
+            self._active_process = process
+
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self._terminate_process(process)
+            stdout, stderr = process.communicate()
+            return RunResult(
+                success=False,
+                output=stdout.strip(),
+                exit_code=-1,
+                duration_seconds=float(timeout),
+                error=f"Timeout after {timeout}s",
+                error_type="timeout",
+            )
+        finally:
+            with self._process_lock:
+                if self._active_process is process:
+                    self._active_process = None
+
+        duration = time.monotonic() - start
+        stdout = stdout.strip()
+        stderr = stderr.strip()
+
+        if self._cancel_requested:
+            return RunResult(
+                success=False,
+                output=stdout,
+                exit_code=-1,
+                duration_seconds=round(duration, 1),
+                error="Cancelled",
+                error_type="cancelled",
+            )
+
+        return RunResult(
+            success=process.returncode == 0 and (not success_requires_output or len(stdout) > 0),
+            output=stdout,
+            exit_code=process.returncode,
+            duration_seconds=round(duration, 1),
+            error=stderr if process.returncode != 0 else None,
+            error_type="error" if process.returncode != 0 else None,
+        )
 
     @abstractmethod
     def _run_impl(

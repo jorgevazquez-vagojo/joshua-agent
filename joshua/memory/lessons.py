@@ -4,6 +4,8 @@ import json
 import logging
 from pathlib import Path
 
+from joshua.utils.redact import redact_secrets
+
 log = logging.getLogger("joshua")
 
 MAX_LESSONS_PER_AGENT = 30
@@ -20,6 +22,9 @@ def extract_lessons(
     verdict: str | None = None,
 ):
     """Extract lessons from agent output and save to lessons file."""
+    task = redact_secrets(task)
+    output = redact_secrets(output)
+
     lessons_dir = state_dir / "memory"
     lessons_dir.mkdir(parents=True, exist_ok=True)
 

@@ -1,7 +1,6 @@
 """Custom command template runner."""
 
 import shlex
-import subprocess
 import time
 from pathlib import Path
 
@@ -72,29 +71,13 @@ class CustomRunner(LLMRunner):
                     error_type="error",
                 )
 
-            start = time.monotonic()
-            result = subprocess.run(
-                shlex.split(cmd),
-                capture_output=True,
-                text=True,
-                timeout=timeout,
+            cmd_args = shlex.split(cmd)
+            return self._run_command(
+                cmd_args,
                 cwd=cwd,
-            )
-            duration = time.monotonic() - start
-            return RunResult(
-                success=result.returncode == 0 and len(result.stdout.strip()) > 0,
-                output=result.stdout.strip(),
-                exit_code=result.returncode,
-                duration_seconds=round(duration, 1),
-                error=result.stderr.strip() if result.returncode != 0 else None,
-                error_type="error" if result.returncode != 0 else None,
-            )
-        except subprocess.TimeoutExpired:
-            return RunResult(
-                success=False, output="", exit_code=-1,
-                duration_seconds=float(timeout),
-                error=f"Timeout after {timeout}s",
-                error_type="timeout",
+                timeout=timeout,
+                success_requires_output=True,
+                binary_not_found_message=f"Command not found: {cmd_args[0]}",
             )
         finally:
             # Clean up prompt file and old temp files (>1h)

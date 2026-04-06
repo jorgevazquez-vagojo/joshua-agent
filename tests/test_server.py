@@ -191,3 +191,117 @@ class TestHubCallback:
         # Should only call API once due to cache
         assert mock_get.call_count == 1
         assert ctx1 == ctx2
+
+
+class TestHttpServer:
+    @pytest.fixture
+    def server_client(self, monkeypatch):
+        pytest.importorskip("httpx", reason="HTTP client dependency not installed")
+        fastapi_testclient = pytest.importorskip("fastapi.testclient")
+        from joshua import server
+
+        class DummySprint:
+            def __init__(self, config):
+                self.config = config
+                self.project_name = config["project"]["name"]
+                self.cycle = 0
+                self.stats = {"go": 0, "caution": 0, "revert": 0, "errors": 0}
+                self.gate_blocked = False
+                self.last_gate_severity = "none"
+                self.last_gate_issues = []
+                self.stopped = False
+                self.on_cycle_complete = None
+
+            def run(self):
+                self.cycle = 1
+
+            def stop(self):
+                self.stopped = True
+
+        class DummyThread:
+            def __init__(self, target, args=(), daemon=False, name=None):
+                self._target = target
+                self._args = args
+                self.daemon = daemon
+                self.name = name
+                self._alive = False
+
+            def start(self):
+                self._alive = True
+                self._target(*self._args)
+                self._alive = False
+
+            def is_alive(self):
+                return self._alive
+
+        monkeypatch.setattr(server, "INTERNAL_TOKEN", "secret")
+        monkeypatch.setattr(server, "MAX_CONCURRENT_SPRINTS", 10)
+        monkeypatch.setattr(server, "Sprint", DummySprint)
+        monkeypatch.setattr(server.threading, "Thread", DummyThread)
+        monkeypatch.setattr(server, "setup_hub_integration", lambda sprint, config: None)
+        server._registry.clear()
+
+        client = fastapi_testclient.TestClient(server.app)
+        return server, client
+
+    def test_health_endpoint(self, server_client):
+        _server, client = server_client
+        response = client.get("/health")
+        assert response.status_code == 200
+        assert response.json()["status"] == "ok"
+
+    def test_start_requires_token(self, server_client, tmp_path):
+        _server, client = server_client
+        payload = {
+            "config": {
+                "project": {"name": "demo", "path": str(tmp_path)},
+                "runner": {"type": "claude"},
+                "agents": {"dev": {"skill": "dev"}},
+            }
+        }
+        response = client.post("/sprints", json=payload)
+        assert response.status_code == 401
+
+    def test_start_rejects_private_callback_resolution(self, server_client, monkeypatch, tmp_path):
+        server, client = server_client
+        monkeypatch.setattr(
+            server.socket,
+            "getaddrinfo",
+            lambda *args, **kwargs: [(None, None, None, None, ("127.0.0.1", 443))],
+        )
+        payload = {
+            "config": {
+                "project": {"name": "demo", "path": str(tmp_path)},
+                "runner": {"type": "claude"},
+                "agents": {"dev": {"skill": "dev"}},
+            },
+            "callback_url": "https://callback.example.com/hook",
+        }
+        response = client.post("/sprints", json=payload, headers={"X-Internal-Token": "secret"})
+        assert response.status_code == 422
+
+    def test_start_list_get_and_stop_sprint(self, server_client, tmp_path):
+        server, client = server_client
+        payload = {
+            "config": {
+                "project": {"name": "demo", "path": str(tmp_path)},
+                "runner": {"type": "claude"},
+                "agents": {"dev": {"skill": "dev"}},
+            }
+        }
+        response = client.post("/sprints", json=payload, headers={"X-Internal-Token": "secret"})
+        assert response.status_code == 200
+        sprint_id = response.json()["sprint_id"]
+
+        list_response = client.get("/sprints", headers={"X-Internal-Token": "secret"})
+        assert list_response.status_code == 200
+        assert len(list_response.json()) == 1
+
+        get_response = client.get(f"/sprints/{sprint_id}", headers={"X-Internal-Token": "secret"})
+        assert get_response.status_code == 200
+        assert get_response.json()["project"] == "demo"
+
+        stop_response = client.post(f"/sprints/{sprint_id}/stop", headers={"X-Internal-Token": "secret"})
+        assert stop_response.status_code == 200
+        assert stop_response.json()["stopped"] is True
+        assert server._registry[sprint_id].sprint.stopped is True

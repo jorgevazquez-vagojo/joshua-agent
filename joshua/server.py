@@ -6,15 +6,16 @@ Sprints run in background threads; state is persisted in SQLite.
     joshua serve --port 8100
 """
 
-import hmac
-import ipaddress
 import logging
+import ipaddress
 import os
+import secrets
 import socket
 import threading
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
+from urllib.parse import urlparse
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Depends, Header, Query
@@ -44,7 +45,7 @@ def verify_token(x_internal_token: str = Header(default="")):
             status_code=503,
             detail="Server not configured: set JOSHUA_INTERNAL_TOKEN env var before starting."
         )
-    if not hmac.compare_digest(x_internal_token, INTERNAL_TOKEN):
+    if not x_internal_token or not secrets.compare_digest(x_internal_token, INTERNAL_TOKEN):
         raise HTTPException(status_code=401, detail="Invalid or missing X-Internal-Token")
 
 
@@ -90,7 +91,7 @@ app = FastAPI(
 class SprintEntry:
     """Tracks a running sprint and its thread."""
 
-    def __init__(self, sprint_id: str, sprint: Sprint, thread: threading.Thread,
+    def __init__(self, sprint_id: str, sprint: Sprint, thread: threading.Thread | None,
                  config: dict):
         self.sprint_id = sprint_id
         self.sprint = sprint
@@ -128,28 +129,7 @@ class StartSprintRequest(BaseModel):
     def validate_callback_url(cls, v: str | None) -> str | None:
         if v is None:
             return v
-        from urllib.parse import urlparse
-        parsed = urlparse(v)
-        if parsed.scheme not in ("http", "https"):
-            raise ValueError("callback_url must use http or https")
-        host = parsed.hostname or ""
-        if not host:
-            raise ValueError("callback_url must have a hostname")
-
-        # Resolve DNS to actual IP — prevents DNS rebinding attacks
-        try:
-            resolved = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
-            ips = {r[4][0] for r in resolved}
-        except socket.gaierror:
-            raise ValueError(f"callback_url hostname cannot be resolved: {host}")
-
-        for ip_str in ips:
-            ip = ipaddress.ip_address(ip_str)
-            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
-                raise ValueError(
-                    f"callback_url resolves to non-public address: {ip_str}"
-                )
-        return v
+        return _validate_callback_url(v)
 
 
 class SprintStatus(BaseModel):
@@ -215,6 +195,39 @@ def _run_sprint_thread(entry: SprintEntry):
         log.error(f"Sprint {entry.sprint_id} crashed: {e}")
         if _db:
             _db.complete_sprint(entry.sprint_id, "failed", error=str(e))
+
+
+def _validate_callback_url(callback_url: str) -> str:
+    """Validate callback_url against resolved DNS/IP targets."""
+    parsed = urlparse(callback_url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError("callback_url must be an absolute http(s) URL")
+
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        addrinfo = socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError(f"callback_url hostname could not be resolved: {parsed.hostname}") from exc
+
+    seen = set()
+    for _, _, _, _, sockaddr in addrinfo:
+        ip = ipaddress.ip_address(sockaddr[0])
+        if ip in seen:
+            continue
+        seen.add(ip)
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
+            raise ValueError(
+                f"callback_url host resolved to a non-public address: {parsed.hostname}"
+            )
+
+    return callback_url
 
 
 def _make_callback(callback_url: str):
@@ -345,8 +358,6 @@ def start_sprint(req: StartSprintRequest):
     # Compose cycle callback: DB persistence + optional external URL
     external_cb = _make_callback(req.callback_url) if req.callback_url else None
     sprint.on_cycle_complete = _db_cycle_callback(sprint_id, external_cb)
-
-    # Create entry first, then thread (no _args hack)
     entry = SprintEntry(sprint_id, sprint, None, config)
     thread = threading.Thread(
         target=_run_sprint_thread,
@@ -355,8 +366,6 @@ def start_sprint(req: StartSprintRequest):
         name=f"sprint-{sprint_id}",
     )
     entry.thread = thread
-
-    # Persist before starting thread
     if _db:
         _db.insert_sprint(sprint_id, sprint.project_name, config, entry.started_at)
 

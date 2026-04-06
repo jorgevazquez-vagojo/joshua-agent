@@ -11,10 +11,19 @@ os.environ["JOSHUA_INTERNAL_TOKEN"] = TOKEN
 
 @pytest.fixture(scope="module")
 def client():
+    pytest.importorskip("httpx", reason="fastapi test client dependency missing")
     from fastapi.testclient import TestClient
     from joshua.server import app
     with TestClient(app, raise_server_exceptions=False) as c:
         yield c
+
+
+@pytest.fixture(autouse=True)
+def clear_registry():
+    from joshua import server
+    server._registry.clear()
+    yield
+    server._registry.clear()
 
 
 @pytest.fixture
@@ -118,19 +127,21 @@ class TestStartSprint:
 
     def test_ssrf_callback_url_blocked(self, client, auth_headers, minimal_config):
         """Internal IP in callback_url must be rejected."""
-        r = client.post(
-            "/sprints",
-            json={"config": minimal_config, "callback_url": "http://localhost/exfil"},
-            headers=auth_headers,
-        )
+        with patch("joshua.server.socket.getaddrinfo", return_value=[(None, None, None, None, ("127.0.0.1", 80))]):
+            r = client.post(
+                "/sprints",
+                json={"config": minimal_config, "callback_url": "http://localhost/exfil"},
+                headers=auth_headers,
+            )
         assert r.status_code == 422
 
     def test_ssrf_callback_10x_blocked(self, client, auth_headers, minimal_config):
-        r = client.post(
-            "/sprints",
-            json={"config": minimal_config, "callback_url": "http://10.0.0.1/hook"},
-            headers=auth_headers,
-        )
+        with patch("joshua.server.socket.getaddrinfo", return_value=[(None, None, None, None, ("10.0.0.1", 80))]):
+            r = client.post(
+                "/sprints",
+                json={"config": minimal_config, "callback_url": "http://10.0.0.1/hook"},
+                headers=auth_headers,
+            )
         assert r.status_code == 422
 
     def test_callback_url_non_http_scheme_blocked(self, client, auth_headers, minimal_config):
@@ -150,11 +161,12 @@ class TestStartSprint:
         mock_t.is_alive.return_value = True
         mock_thread.return_value = mock_t
 
-        r = client.post(
-            "/sprints",
-            json={"config": minimal_config, "callback_url": "https://webhook.example.com/hook"},
-            headers=auth_headers,
-        )
+        with patch("joshua.server.socket.getaddrinfo", return_value=[(None, None, None, None, ("8.8.8.8", 443))]):
+            r = client.post(
+                "/sprints",
+                json={"config": minimal_config, "callback_url": "https://webhook.example.com/hook"},
+                headers=auth_headers,
+            )
         assert r.status_code == 200
 
     def test_ssrf_172_16_blocked(self, client, auth_headers, minimal_config):

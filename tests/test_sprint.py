@@ -70,6 +70,14 @@ class TestSprint:
         assert "deploy_command" in ctx
         assert "gate_findings" in ctx
 
+    def test_stop_cancels_runner_and_sets_event(self, minimal_config):
+        sprint = Sprint(minimal_config)
+        sprint.runner = MagicMock()
+        sprint.stop()
+        assert sprint._stop_requested is True
+        assert sprint._stop_event.is_set() is True
+        sprint.runner.cancel.assert_called_once()
+
     def test_agents_categorized_by_phase(self, minimal_config):
         sprint = Sprint(minimal_config)
         work = [a for a in sprint.agents if a.phase == "work"]
@@ -171,6 +179,24 @@ class TestSprintMemory:
         wiki_raw = sprint.state_dir / "wiki" / "raw"
         if wiki_raw.exists():
             assert len(list(wiki_raw.glob("*.md"))) >= 0
+
+    def test_record_result_redacts_secrets(self, minimal_config):
+        sprint = Sprint(minimal_config)
+        sprint.cycle = 1
+        agent = sprint.agents[0]
+        result = RunResult(
+            success=True,
+            output="Authorization: Bearer verysecretvalue\nAPI_KEY=sk-abcdef1234567890",
+            exit_code=0,
+            duration_seconds=1.0,
+        )
+
+        sprint._record_result(agent, "rotate password=hunter2", result)
+
+        raw_content = next((sprint.state_dir / "wiki" / "raw").glob("*.md")).read_text()
+        assert "hunter2" not in raw_content
+        assert "verysecretvalue" not in raw_content
+        assert "sk-abcdef1234567890" not in raw_content
 
 
 # ── Production features ─────────────────────────────────────────
@@ -342,6 +368,18 @@ class TestRetry:
         assert result.success
         assert mock_run_agent.call_count == 2  # original + 1 retry
 
+    def test_retry_returns_cancelled_when_stopped(self, minimal_config):
+        minimal_config["sprint"]["retries"] = 2
+        sprint = Sprint(minimal_config)
+        sprint.stop()
+
+        fail = RunResult(success=False, output="", exit_code=1, duration_seconds=1.0, error="fail")
+
+        with patch.object(sprint, "_run_agent", return_value=fail):
+            result = sprint._run_agent_with_retry(sprint.agents[0], "task", {})
+
+        assert result.error_type == "cancelled"
+
     def test_no_retry_by_default(self, minimal_config):
         sprint = Sprint(minimal_config)
         assert sprint.retries == 0
@@ -419,7 +457,7 @@ class TestAgentStagger:
         minimal_config["sprint"]["agent_stagger"] = 10
         sprint = Sprint(minimal_config)
         sprint._stagger_wait("vulcan")
-        mock_sleep.assert_called_once_with(10)
+        mock_sleep.assert_not_called()
 
     @patch("joshua.sprint.wait_for_memory", return_value=True)
     def test_stagger_wait_checks_memory(self, mock_wait, minimal_config):
@@ -436,7 +474,7 @@ class TestAgentStagger:
         sprint = Sprint(minimal_config)
         sprint._stagger_wait("wopr")
         mock_wait.assert_called_once_with(2, timeout=120)
-        mock_sleep.assert_called_once_with(15)
+        mock_sleep.assert_not_called()
 
 
 class TestSafeCmd:
