@@ -7,10 +7,13 @@ Each cycle: pick tasks, run work agents, gate agents review, deploy or revert.
 import json
 import logging
 import os
+import re
+import signal
 import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
+from logging.handlers import RotatingFileHandler
 
 from joshua.agents import Agent, agents_from_config
 from joshua.config import load_config
@@ -56,9 +59,11 @@ class Sprint:
         self.gate_blocking = sprint_conf.get("gate_blocking", False)
         self.cross_agent_context = sprint_conf.get("cross_agent_context", False)
         self.health_check_enabled = sprint_conf.get("health_check", False)
+        self.health_check_max_failures = sprint_conf.get("health_check_max_failures", 3)
         self.recovery_deploy = sprint_conf.get("recovery_deploy", "")
         self.retries = sprint_conf.get("retries", 0)
         self.max_consecutive_errors = sprint_conf.get("max_consecutive_errors", 0)
+        self._consecutive_health_failures = 0
         self.git_strategy = sprint_conf.get("git_strategy", "none")
         self.agent_stagger = sprint_conf.get("agent_stagger", 0)  # seconds between agents
         self.min_memory_gb = sprint_conf.get("min_memory_gb", 0)  # wait for RAM before agent
@@ -182,7 +187,7 @@ class Sprint:
         log.info(f"CYCLE {self.cycle} — {datetime.now().isoformat(timespec='seconds')}")
         log.info(f"{'='*60}")
 
-        # Health check
+        # Health check — only stop sprint after N consecutive failures
         if self.health_check_enabled and self.health_url:
             if not check_health(self.health_url):
                 log.warning("Health check failed — attempting recovery")
@@ -190,11 +195,21 @@ class Sprint:
                     self._deploy(self.recovery_deploy)
                     time.sleep(10)
                 if not check_health(self.health_url):
-                    log.error("Still unhealthy after recovery — skipping cycle")
+                    self._consecutive_health_failures += 1
+                    log.error(
+                        f"Still unhealthy after recovery "
+                        f"({self._consecutive_health_failures}/{self.health_check_max_failures})"
+                        " — skipping cycle"
+                    )
                     self.notifier.notify_event("health_fail",
                         f"Cycle {self.cycle} skipped — service unhealthy",
                         self.project_name)
+                    if self._consecutive_health_failures >= self.health_check_max_failures:
+                        log.error("Max consecutive health failures reached — stopping sprint")
+                        self._stop_requested = True
                     return "CAUTION"
+            else:
+                self._consecutive_health_failures = 0
 
         # Git snapshot (if enabled)
         branch = None
@@ -382,13 +397,22 @@ class Sprint:
         return ctx
 
     def _parse_verdict(self, output: str) -> str:
-        """Extract GO/CAUTION/REVERT from QA output."""
-        for line in output.split("\n"):
-            line = line.strip().upper()
-            if line.startswith("VERDICT:"):
-                v = line.split(":", 1)[1].strip()
-                if v in ("GO", "CAUTION", "REVERT"):
-                    return v
+        """Extract GO/CAUTION/REVERT from QA output.
+
+        Handles varied formatting: plain text, markdown bold (**VERDICT: GO**),
+        indentation, and newlines between label and value.
+        """
+        import re
+        # Strip markdown formatting and search for verdict anywhere in output
+        clean = re.sub(r"[*_`#>]", "", output)
+        match = re.search(
+            r"VERDICT\s*:\s*(GO|CAUTION|REVERT)",
+            clean,
+            re.IGNORECASE | re.MULTILINE,
+        )
+        if match:
+            return match.group(1).upper()
+        log.warning("Could not parse verdict from QA output — defaulting to CAUTION")
         return "CAUTION"  # safe default
 
     def _deploy(self, cmd: str | None = None):
@@ -445,6 +469,8 @@ class Sprint:
             "timestamp": datetime.now().isoformat(),
             "project": self.project_name,
             "gate_blocked": self.gate_blocked,
+            "last_gate_findings": self.last_gate_findings,
+            "consecutive_errors": self.consecutive_errors,
         }
         path = self.state_dir / "checkpoint.json"
         tmp = path.with_suffix(".tmp")
@@ -460,6 +486,8 @@ class Sprint:
                 data = json.loads(path.read_text())
                 self.stats = data.get("stats", self.stats)
                 self.gate_blocked = data.get("gate_blocked", False)
+                self.last_gate_findings = data.get("last_gate_findings", "")
+                self.consecutive_errors = data.get("consecutive_errors", 0)
                 cycle = data.get("cycle", 0)
                 log.info(f"Resumed from checkpoint: cycle {cycle}")
                 return cycle

@@ -1,6 +1,8 @@
 """CLI entry point for joshua-agent."""
 
+import signal
 import sys
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import click
@@ -50,11 +52,37 @@ def run(config: str, max_cycles: int, max_hours: float, dry_run: bool):
     import logging
     log = logging.getLogger("joshua")
     log.setLevel(logging.INFO)
-    handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-    log.addHandler(handler)
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(fmt)
+    log.addHandler(stream_handler)
+
+    # Rotating log file in .joshua/logs/
+    state_dir = Path(cfg.get("memory", {}).get(
+        "state_dir",
+        Path(cfg["project"]["path"]).expanduser() / ".joshua"
+    ))
+    log_dir = state_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    file_handler = RotatingFileHandler(
+        log_dir / "sprint.log",
+        maxBytes=100 * 1024 * 1024,  # 100MB
+        backupCount=5,
+    )
+    file_handler.setFormatter(fmt)
+    log.addHandler(file_handler)
 
     sprint = Sprint(cfg)
+
+    # Graceful shutdown on SIGTERM (e.g., docker stop) and SIGINT (Ctrl+C)
+    def _shutdown(signum, frame):
+        log.info(f"Signal {signum} received — stopping sprint gracefully")
+        sprint.stop()
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+
     sprint.run()
 
 

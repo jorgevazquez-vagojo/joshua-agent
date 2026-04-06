@@ -55,33 +55,41 @@ class GitOps:
             log.error(f"Failed to create snapshot: {e.stderr}")
             return None
 
-    def merge_to_main(self, branch_name: str, main_branch: str = "main") -> bool:
-        """Merge snapshot branch back to main.
+    def detect_main_branch(self) -> str:
+        """Detect the primary branch (main, master, develop, trunk...)."""
+        for candidate in ("main", "master", "develop", "trunk"):
+            result = self._run("rev-parse", "--verify", candidate, check=False)
+            if result.returncode == 0:
+                return candidate
+        # Fallback: use current branch
+        return self.current_branch() or "main"
 
-        Returns True if merge was successful.
-        """
+    def merge_to_main(self, branch_name: str, main_branch: str | None = None) -> bool:
+        """Merge snapshot branch back to main (auto-detects primary branch)."""
+        target = main_branch or self.detect_main_branch()
         try:
-            self._run("checkout", main_branch)
+            self._run("checkout", target)
             self._run("merge", branch_name, "--no-ff", "-m",
                        f"Merge sprint cycle: {branch_name}")
-            log.info(f"Merged {branch_name} to {main_branch}")
+            log.info(f"Merged {branch_name} to {target}")
             return True
         except subprocess.CalledProcessError as e:
             log.error(f"Merge failed: {e.stderr}")
-            # Abort merge if in conflict
             self._run("merge", "--abort", check=False)
-            self._run("checkout", main_branch, check=False)
+            self._run("checkout", target, check=False)
             return False
 
-    def revert(self, branch_name: str, main_branch: str = "main") -> bool:
+    def revert(self, branch_name: str, main_branch: str | None = None) -> bool:
         """Discard a snapshot branch (REVERT verdict)."""
+        target = main_branch or self.detect_main_branch()
         try:
-            self._run("checkout", main_branch)
+            self._run("checkout", target)
             self._run("branch", "-D", branch_name)
             log.info(f"Reverted: deleted branch {branch_name}")
             return True
         except subprocess.CalledProcessError as e:
             log.warning(f"Revert cleanup failed: {e.stderr}")
+            self._run("checkout", target, check=False)
             return False
 
     def commit_all(self, message: str) -> bool:

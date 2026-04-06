@@ -29,7 +29,7 @@ class AiderRunner(LLMRunner):
         if system_prompt:
             full_prompt = f"{system_prompt}\n\n---\n\n{prompt}"
 
-        cmd = [binary, "--message", full_prompt, "--yes-always", "--no-git"]
+        cmd = [binary, "--message", full_prompt, "--yes-always"]
 
         if model:
             cmd.extend(["--model", model])

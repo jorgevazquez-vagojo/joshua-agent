@@ -1,0 +1,27 @@
+project:
+  name: demo-api
+  path: ~/demo-api
+
+runner:
+  type: claude
+  timeout: 90
+
+agents:
+  dev:
+    skill: dev
+    tasks:
+      - "Fix the SQL injection vulnerabilities in api.py using parameterized queries"
+      - "Remove the hardcoded SECRET_KEY and use os.environ instead"
+      - "Fix the N+1 query in get_all_tasks with a proper JOIN"
+  bug-hunter:
+    skill: bug-hunter
+    tasks:
+      - "Find and fix missing input validation in create_task"
+      - "Add error handling to delete_task when task does not exist"
+  qa:
+    skill: qa
+
+sprint:
+  max_cycles: 1
+  max_changes_per_cycle: 6
+  cycle_sleep: 0
