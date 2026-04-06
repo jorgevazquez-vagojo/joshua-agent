@@ -1,0 +1,55 @@
+# WordPress site sprint config
+# Usage: joshua run examples/wordpress.yaml
+
+project:
+  name: my-wordpress-site
+  path: ~/my-wordpress-site
+  deploy: "bash deploy.sh 'sprint auto-deploy'"
+  health_url: http://localhost:8080
+
+runner:
+  type: claude
+  timeout: 1800
+  allowed_tools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+
+agents:
+  builder:
+    name: lightman
+    role: builder
+    tasks:
+      - "Audit HTML/CSS for WCAG AA accessibility compliance (4.5:1 contrast ratio minimum)"
+      - "Review and optimize Core Web Vitals (LCP, FID, CLS)"
+      - "Check SEO meta tags, structured data, and sitemap"
+      - "Audit PHP code for WordPress coding standards (WPCS)"
+      - "Review theme template hierarchy and fix any issues"
+      - "Optimize images and assets (lazy loading, WebP, compression)"
+      - "Check responsive design across breakpoints"
+      - "Review and optimize database queries in custom code"
+  debugger:
+    name: vulcan
+    role: debugger
+    tasks:
+      - "Scan for broken internal and external links"
+      - "Check for PHP errors, warnings, and notices"
+      - "Audit CSS for cross-browser compatibility issues"
+      - "Scan for JavaScript errors in console"
+      - "Check form validation and submission handlers"
+      - "Audit security: XSS, CSRF, SQL injection in custom code"
+      - "Check for deprecated WordPress functions"
+  qa:
+    name: wopr
+    role: qa
+
+sprint:
+  cycle_sleep: 300
+  max_changes_per_cycle: 5
+  digest_every: 12
+
+memory:
+  enabled: true
+  evolve_at: "10:00"
+
+notifications:
+  type: telegram
+  token: ${TELEGRAM_TOKEN}
+  chat_id: ${TELEGRAM_CHAT_ID}

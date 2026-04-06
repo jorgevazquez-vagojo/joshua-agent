@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "joshua-agent"
+version = "0.1.0"
+description = "Run AI agent teams in autonomous cycles. Define skills in YAML (Dev, QA, CFO, Legal — anything), gate reviews with GO/CAUTION/REVERT verdicts, auto-deploy or rollback, self-learning wiki. Works with Claude Code, Codex, Aider, or any LLM CLI. Shall we play a game?"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    {name = "Jorge Vazquez", email = "jorge.vazquez@redegal.com"},
+]
+keywords = ["ai", "agents", "autonomous", "multi-agent", "sprint", "llm", "claude", "codex", "aider", "skills", "quality-gate"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Information Technology",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Office/Business",
+]
+dependencies = [
+    "click>=8.1",
+    "pyyaml>=6.0",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+redis = ["redis>=5.0"]
+server = ["fastapi>=0.115", "uvicorn>=0.32"]
+all = ["redis>=5.0", "fastapi>=0.115", "uvicorn>=0.32"]
+dev = ["pytest>=8.0", "ruff>=0.4"]
+
+[project.scripts]
+joshua = "joshua.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/jorgevazquez/joshua-agent"
+Documentation = "https://github.com/jorgevazquez/joshua-agent#readme"
+Repository = "https://github.com/jorgevazquez/joshua-agent"
+Issues = "https://github.com/jorgevazquez/joshua-agent/issues"
+
+[tool.setuptools.packages.find]
+include = ["joshua*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

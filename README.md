@@ -1,0 +1,287 @@
+# joshua-agent
+
+**"Shall we play a game?"**
+
+*One day, teams will stop babysitting AI. Instead of prompting one agent at a time — copy prompt, paste output, check, repeat — they'll define a team in a YAML file and walk away. A developer, a bug hunter, a QA reviewer. Or a CFO, a risk analyst, a compliance director. The agents work in cycles: execute tasks, review each other, deploy or roll back, extract lessons, sleep, repeat. You come back to a log of what happened and (hopefully) better output than yesterday. This is that framework. — @jorgevazquez, April 2026*
+
+The idea: define a team of AI agents as **skills** in YAML, point them at a folder (code, documents, reports — anything), and let them run autonomously in cycles. Each cycle, work agents execute their tasks. Gate agents review the output and issue a verdict: `GO`, `CAUTION`, or `REVERT`. Bad work gets rolled back. Good work gets deployed. The agents learn from every cycle — lessons accumulate, a wiki builds itself, and future prompts get better automatically. You sleep. They work.
+
+Named after the AI in WarGames that learned the only winning move is to keep playing.
+
+```
+ Work Skills              Gate Skills
++--------------+          +----------+
+| Dev          |          |          |
+| Bug Hunter   |--------->|   QA     |--> Deploy (or Revert)
+| CFO          |          | Review   |
+| Any Skill... |          +----------+
++--------------+               |
+       ^                       |
+       +---- next cycle -------+
+```
+
+## How it works
+
+joshua-agent has three core concepts:
+
+- **Skills** — a skill is any professional role you can describe in a prompt. `dev`, `qa`, `bug-hunter`, `security`, `cfo`, `legal-analyst`, `compliance`, `pm`, `tech-writer`, or literally anything else. Built-in skills are just prompt templates. You can define your own with `system_prompt:` in YAML — if you can brief a human, you can brief an agent.
+- **Phases** — agents are either `work` (execute tasks) or `gate` (review and judge). Work agents produce output. Gate agents read that output and return a verdict: `GO` (ship it), `CAUTION` (ship but flag), or `REVERT` (roll back). This separation exists because unsupervised AI output is dangerous. The gate is a circuit breaker.
+- **Cycles** — agents don't run once. They cycle. Each cycle picks the next task (round-robin), runs all work agents, feeds the output to gate agents, acts on the verdict, extracts lessons, and sleeps. Then does it again. This is how real teams work — continuous improvement, not heroic one-off efforts.
+
+The runner abstraction means joshua-agent doesn't care what LLM you use. Claude Code, OpenAI Codex, Aider, or any CLI tool. Swap it in the YAML and everything else stays the same.
+
+## Quick start
+
+```bash
+pip install joshua-agent
+```
+
+**Example 1 — Development sprint.** Three agents write code, hunt bugs, and review. QA issues verdicts. Good code gets deployed.
+
+```yaml
+# dev-sprint.yaml
+project:
+  name: my-app
+  path: ~/my-app
+  deploy: "npm run build && npm start"
+
+agents:
+  dev:
+    skill: dev
+    tasks:
+      - "Review code quality and suggest improvements"
+      - "Refactor for maintainability"
+  bug-hunter:
+    skill: bug-hunter
+    tasks:
+      - "Scan for uncaught exceptions and error handling gaps"
+  qa:
+    skill: qa
+
+sprint:
+  cycle_sleep: 300
+```
+
+**Example 2 — Executive sprint.** No code. No deploy command. Agents analyze documents, audit costs, and check compliance. Same framework, different skills.
+
+```yaml
+# executive.yaml
+project:
+  name: acme-corp
+  path: ~/acme-corp-docs
+
+agents:
+  cfo:
+    skill: cfo
+    system_prompt: |
+      You are {agent_name}, CFO for {project_name}.
+      Analyze financial documents in {project_dir}.
+    tasks:
+      - "Audit vendor contracts expiring within 90 days"
+      - "Analyze monthly burn rate from financial reports"
+  compliance:
+    skill: compliance
+    phase: gate
+    verdict_format: true
+    system_prompt: |
+      You are {agent_name}, Compliance Director.
+      Review all analysis for regulatory compliance.
+
+sprint:
+  cycle_sleep: 600
+  gate_blocking: true
+```
+
+```bash
+joshua run dev-sprint.yaml    # Software sprint
+joshua run executive.yaml     # Business analysis sprint
+```
+
+Agents work, gate reviews, act on verdict. Repeat. Any domain, any role.
+
+### What it looks like
+
+```
+============================================================
+CYCLE 1 — 2026-04-05T03:14:00
+============================================================
+[cfo] (cfo) Task: Audit vendor contracts expiring within 90 days
+[cfo] OK (189.3s, 3841 chars)
+[compliance] (compliance) Reviewing cycle 1...
+[compliance] OK (94.2s, 1102 chars)
+VERDICT: GO
+CYCLE 1 COMPLETE — verdict=GO
+Sleeping 600s before next cycle...
+```
+
+## Design choices
+
+**Skills, not roles.** Every agent is a skill defined in YAML. Built-in skills (`dev`, `qa`, `bug-hunter`, `security`, `perf`, `pm`, `tech-writer`) are convenient starting points — just prompt templates with sensible defaults. But the real power is custom skills: a CFO that audits costs, a legal analyst that reviews contracts, a compliance officer that checks governance, a COO that maps operational bottlenecks. No deploy command needed. No code required. joshua-agent is not a coding tool that happens to support other things. It's a framework for autonomous professional work that happens to be good at code too.
+
+**Two phases: work and gate.** Work agents do the job. Gate agents judge it. This is the single most important design decision in the framework. Without a gate, you're just running unsupervised AI and hoping for the best. The gate is a circuit breaker — `REVERT` means nothing ships. In production, we've seen gate agents catch issues that would have broken deployments, flagged non-compliant analysis, and prevented cascading errors. The two-phase model also means you can scale work agents independently of review capacity.
+
+**Continuous cycles, not one-shot.** Most agent frameworks run once and stop. joshua-agent cycles. Each cycle picks the next task from a round-robin queue, so a dev agent with 10 tasks will work through all of them across 10 cycles. After each cycle, agents extract lessons from their output. What worked, what broke, what patterns to follow or avoid. These lessons accumulate and get injected into future prompts. The agents literally get better over time. We've observed measurable improvement in output quality between cycle 1 and cycle 10 on the same project.
+
+**Self-learning via wiki (Karpa pattern).** Raw agent output from every cycle gets saved. Periodically, the LLM curates this raw output into structured knowledge entries — a wiki that builds itself. Entries get deduplicated, lint-checked for contradictions, and fed back to agents as context. You never write the wiki. The LLM writes everything. You just steer — every answer compounds into institutional knowledge.
+
+**LLM-agnostic.** joshua-agent talks to CLI tools, not APIs. Claude Code, OpenAI Codex, Aider, or any custom command that accepts a prompt and returns text. The runner is a one-method interface: `run(prompt, cwd, system_prompt, timeout) -> RunResult`. Swap it in YAML, everything else stays the same. This means you can use different models for different agents — Opus for the gate, Sonnet for work agents, a local model for experiments.
+
+**Gate blocking.** When a gate says `REVERT`, you probably don't want work agents piling more changes on top. `gate_blocking: true` freezes work agents on the next cycle. Only agents marked `run_when_blocked: true` (like bug hunters and security scanners) will run. This prevents compounding failures — the bug hunter fixes what the gate flagged, the gate reviews the fix, and only then does normal work resume.
+
+**Cross-agent context.** Gate findings from the previous cycle get injected into work agents' prompts via `{gate_findings}`. The QA agent tells the dev agent what's wrong. The dev agent fixes it next cycle. They talk through the framework — no manual copy-paste, no context loss between runs.
+
+**Resource-aware scheduling.** Each LLM agent consumes significant memory. Running multiple sprints on the same machine can trigger OOM kills (we learned this the hard way). `min_memory_gb` checks available RAM before each agent run — if memory is low, joshua-agent waits instead of crashing. `agent_stagger` adds a fixed delay between agent executions to let the system breathe. Together, they let you safely run multiple sprints on a single server.
+
+## Supported runners
+
+| Runner | Command | Install |
+|--------|---------|---------|
+| **Claude Code** | `claude` | `npm i -g @anthropic-ai/claude-code` |
+| **OpenAI Codex** | `codex` | `npm i -g @openai/codex` |
+| **Aider** | `aider` | `pip install aider-chat` |
+| **Custom** | any CLI | `command: "my-tool --input {prompt_file} --dir {cwd}"` |
+
+## Full config reference
+
+```yaml
+project:
+  name: my-project
+  path: ~/my-project                # Any folder — code, docs, reports, data
+  deploy: "bash deploy.sh"          # Optional — omit for non-code sprints
+  health_url: http://localhost:3000/health  # Optional
+
+runner:
+  type: claude                  # claude | codex | aider | custom
+  timeout: 1800                 # Max seconds per agent run
+  model: sonnet                 # Model override (optional)
+
+agents:
+  dev:
+    name: lightman              # Custom name (optional)
+    skill: dev                  # Built-in or custom skill
+    max_changes: 5              # Max changes per cycle
+    run_when_blocked: false     # Run even when gate is blocked
+    tasks:
+      - "Task 1"
+      - "Task 2"               # Round-robin through list
+
+  qa:
+    skill: qa                   # Gate skills auto-detect verdict format
+
+  cfo:
+    skill: cfo
+    system_prompt: |            # Any prompt you want
+      You are {agent_name}, a CFO reviewing {project_name}.
+      Analyze costs, licensing, and resource usage.
+    tasks:
+      - "Audit third-party dependency costs"
+
+sprint:
+  cycle_sleep: 300              # Seconds between cycles
+  max_cycles: 0                 # 0 = infinite
+  max_hours: 96                 # 0 = infinite
+  digest_every: 12              # Summary report every N cycles
+  retries: 2                    # Retry failed agent runs
+  revert_sleep: 600             # Longer sleep after REVERT
+  max_consecutive_errors: 5     # Stop after N errors in a row
+  gate_blocking: true           # REVERT blocks work agents
+  cross_agent_context: true     # Gate findings -> work agents
+  health_check: true            # Check health_url each cycle
+  recovery_deploy: "bash rollback.sh"
+  git_strategy: snapshot        # none | snapshot
+  agent_stagger: 30             # Seconds to wait between agent runs
+  min_memory_gb: 4              # Wait for free RAM before each agent
+
+preflight:
+  min_disk_gb: 5                # Check disk before each cycle
+  min_memory_gb: 4              # Check RAM before each cycle
+  memory_wait_timeout: 120      # Seconds to wait if memory is low
+  docker_cleanup: true          # Auto-clean Docker on low disk
+
+notifications:
+  type: telegram                # telegram | slack | webhook | none
+  token: ${TELEGRAM_TOKEN}
+  chat_id: ${TELEGRAM_CHAT_ID}
+
+tracker:
+  type: jira                    # jira | github | filesystem | none
+  base_url: https://x.atlassian.net
+  project_key: PROJ
+
+memory:
+  enabled: true
+  state_dir: .joshua
+```
+
+Template variables for prompts: `{agent_name}`, `{skill}`, `{project_name}`, `{project_dir}`, `{deploy_command}`, `{memory}`, `{wiki}`, `{gate_findings}`, `{max_changes}`.
+
+## CLI
+
+```bash
+joshua run config.yaml              # Run a sprint
+joshua run config.yaml -n 10        # Max 10 cycles
+joshua run config.yaml -H 96        # Max 96 hours
+joshua run config.yaml --dry-run    # Validate config only
+joshua status .joshua               # Status dashboard
+joshua evolve config.yaml           # Run evolution + wiki maintenance
+```
+
+## Examples
+
+See [`examples/`](examples/) for ready-to-use configs:
+
+**Business & governance:**
+- [`executive-team.yaml`](examples/executive-team.yaml) — CFO + COO + Compliance Director
+- [`legal-review.yaml`](examples/legal-review.yaml) — Legal Analyst + Risk Assessor + General Counsel
+
+**Software development:**
+- [`minimal.yaml`](examples/minimal.yaml) — 3 agents, zero config
+- [`full-team.yaml`](examples/full-team.yaml) — Dev, Bug Hunter, Security, Perf, PM, QA
+- [`wordpress.yaml`](examples/wordpress.yaml) — WordPress: WCAG, SEO, PHP audits
+- [`nextjs.yaml`](examples/nextjs.yaml) — Next.js: TypeScript, React, API audits
+- [`python-api.yaml`](examples/python-api.yaml) — FastAPI/Django: testing, security, DB audits
+
+## Architecture
+
+```
+joshua/
+├── cli.py              CLI entry point
+├── config.py           YAML loader + ${ENV} interpolation
+├── sprint.py           The loop (work → gate → deploy/revert → learn → sleep → repeat)
+├── agents.py           Skill definitions + prompt templates
+├── runners/
+│   ├── base.py         LLMRunner interface
+│   ├── claude.py       Claude Code
+│   ├── codex.py        OpenAI Codex
+│   ├── aider.py        Aider
+│   └── custom.py       Any CLI tool
+├── memory/
+│   ├── lessons.py      Extract lessons from each cycle
+│   ├── wiki.py         Karpa pattern knowledge base
+│   └── evolve.py       Daily evolution + lint
+├── integrations/
+│   ├── git.py          Snapshot, merge, revert
+│   ├── notifications.py Telegram, Slack, webhook
+│   └── trackers.py     Jira, GitHub Issues, filesystem
+└── utils/
+    ├── health.py       HTTP health checks
+    ├── preflight.py    Disk, memory, Docker cleanup
+    └── status.py       Dashboard
+```
+
+## Contributing
+
+Areas where help is needed:
+
+- **Runners**: Cursor, Windsurf, VS Code Copilot
+- **Trackers**: Linear, Notion, Trello
+- **Notifiers**: Discord, email, PagerDuty
+- **Skills**: share your custom skill templates
+
+## License
+
+MIT. See [LICENSE](LICENSE).
+
+---
+
+Built by [Jorge Vazquez](https://github.com/jorgevazquez). The only winning move is to keep playing.

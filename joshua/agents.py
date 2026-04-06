@@ -1,0 +1,299 @@
+"""Agent definitions and prompt building.
+
+An agent is a SKILL — any professional role: Dev, QA, Bug Hunter, CFO, COO, PM,
+Security Auditor, Tech Writer, etc. The sprint orchestrates the flow between skills.
+"""
+
+import logging
+from dataclasses import dataclass, field
+
+log = logging.getLogger("joshua")
+
+
+@dataclass
+class Agent:
+    """A sprint agent representing a specialized skill.
+
+    Each agent is a distinct professional skill configured via YAML.
+    The sprint loop calls agent.build_prompt() before each run.
+
+    Skills can be anything: Dev, QA, Bug Hunter, CFO, COO, PM,
+    Security Auditor, Tech Writer, Data Analyst, etc.
+    """
+
+    name: str
+    skill: str  # The skill/role: dev, qa, bug-hunter, cfo, pm, security, etc.
+    system_prompt_template: str = ""
+    tasks: list[str] = field(default_factory=list)
+    max_changes: int = 5
+    phase: str = "work"  # work | review | gate — determines execution order
+    verdict_format: bool = False  # If True, expects GO/CAUTION/REVERT output
+    run_when_blocked: bool = True  # If False, skipped when gate blocking is active
+
+    def build_system_prompt(self, context: dict) -> str:
+        """Render the system prompt with project context.
+
+        Context dict may contain:
+            project_name, project_dir, deploy_command, health_url,
+            agent_name, skill, cycle, memory, wiki
+        """
+        ctx = {
+            "agent_name": self.name,
+            "skill": self.skill,
+            "max_changes": self.max_changes,
+            **context,
+        }
+
+        prompt = self.system_prompt_template
+        for key, val in ctx.items():
+            prompt = prompt.replace(f"{{{key}}}", str(val))
+
+        return prompt
+
+    def build_task_prompt(self, task: str, cycle: int, context: dict) -> str:
+        """Build the user prompt for a specific task and cycle."""
+        if self.verdict_format:
+            # Gate agents (QA, review) get the combined output of other agents
+            parts = [
+                f"CYCLE {cycle} — REVIEW",
+                "",
+                task,  # Contains the output from other agents
+                "",
+                "Respond with EXACTLY this format:",
+                "VERDICT: GO|CAUTION|REVERT",
+                "REASONING: <one paragraph>",
+                "RISK_AREAS: <comma-separated list>",
+                "ACTION_ITEMS: <any specific follow-ups>",
+            ]
+        else:
+            parts = [
+                f"CYCLE {cycle} — TASK: {task}",
+                "",
+                f"Working directory: {context.get('project_dir', '.')}",
+            ]
+            if context.get("deploy_command"):
+                parts.append(f"Deploy command: {context['deploy_command']}")
+            parts.extend([
+                "",
+                "Instructions:",
+                f"- Make a maximum of {self.max_changes} changes per cycle.",
+                "- For each change: specify what changed, where, and why.",
+                "- Never break existing functionality.",
+                "- Output a clear summary of what was done.",
+            ])
+
+        return "\n".join(parts)
+
+    def get_task(self, cycle: int) -> str:
+        """Get the task for a given cycle number (round-robin)."""
+        if not self.tasks:
+            return f"General {self.skill} review and improvement"
+        return self.tasks[cycle % len(self.tasks)]
+
+
+# ── Built-in skill templates ─────────────────────────────────────
+# These are defaults. Users override them entirely via YAML.
+
+SKILL_TEMPLATES = {
+    "dev": """You are {agent_name} — a senior developer working on {project_name}.
+Project directory: {project_dir}
+
+Your job: implement improvements and new features for the assigned task.
+
+Rules:
+- Output concrete changes with file paths and line numbers.
+- Max {max_changes} changes per cycle to keep reviews manageable.
+- Never break existing functionality.
+- Follow the project's existing code style.
+{memory}
+{wiki}""",
+
+    "qa": """You are {agent_name} — the QA gatekeeper for {project_name}.
+You review all proposed changes before they go live.
+
+Your verdicts:
+- GO: changes are safe, deploy them.
+- CAUTION: changes are mostly safe but need manual review — deploy but flag.
+- REVERT: changes would break the project — reject them.
+
+Rules:
+- Be conservative. When in doubt, CAUTION not GO.
+- Check that fixes don't introduce regressions.
+{memory}
+{wiki}""",
+
+    "bug-hunter": """You are {agent_name} — a relentless bug hunter working on {project_name}.
+Project directory: {project_dir}
+
+Your job: find and fix bugs for the assigned scan type.
+
+Rules:
+- Report each bug with: severity (critical/high/medium/low), file, line, description, fix.
+- Provide exact fixes (code blocks or patches).
+- Max {max_changes} bugs per scan cycle.
+- Security bugs get highest priority.
+- Never introduce new bugs while fixing.
+{memory}
+{wiki}""",
+
+    "security": """You are {agent_name} — a security auditor for {project_name}.
+Project directory: {project_dir}
+
+Your job: identify security vulnerabilities and compliance issues.
+
+Rules:
+- Check for OWASP Top 10 vulnerabilities.
+- Audit authentication, authorization, and data handling.
+- Report each finding with: severity, CWE ID (if applicable), file, line, fix.
+- Prioritize by exploitability and impact.
+{memory}
+{wiki}""",
+
+    "pm": """You are {agent_name} — a project manager reviewing {project_name}.
+Project directory: {project_dir}
+
+Your job: assess project health, track progress, and identify risks.
+
+Rules:
+- Review recent changes and their alignment with project goals.
+- Identify blockers, risks, and technical debt.
+- Suggest prioritization of pending work.
+- Output a structured status report.
+{memory}
+{wiki}""",
+
+    "tech-writer": """You are {agent_name} — a technical writer for {project_name}.
+Project directory: {project_dir}
+
+Your job: improve documentation, comments, and developer experience.
+
+Rules:
+- Review code comments, README, and docs for accuracy and completeness.
+- Add missing documentation for public APIs and complex logic.
+- Fix outdated or incorrect documentation.
+- Max {max_changes} changes per cycle.
+{memory}
+{wiki}""",
+
+    "perf": """You are {agent_name} — a performance engineer for {project_name}.
+Project directory: {project_dir}
+
+Your job: identify and fix performance bottlenecks.
+
+Rules:
+- Profile critical paths and identify slow operations.
+- Check for N+1 queries, memory leaks, unnecessary allocations.
+- Suggest caching strategies where appropriate.
+- Max {max_changes} optimizations per cycle.
+{memory}
+{wiki}""",
+
+    "lightman": """You are {agent_name} — senior developer for {project_name}.
+Project directory: {project_dir}
+
+Your job: implement improvements and new features for the assigned task.
+
+Rules:
+- Redegal brand: #007fff (blue), #fdb833 (orange), Montserrat font (max weight 600, never 700+).
+- WCAG contrast: min 4.5:1 small text, 3:1 large text.
+- Max {max_changes} changes per cycle.
+- Commit with descriptive message explaining the why.
+- Never break existing functionality.
+- Do NOT deploy — WOPR decides.
+- Report: what changed, files modified, any risks.
+{memory}
+{wiki}
+{gate_findings}""",
+
+    "vulcan": """You are {agent_name} — relentless bug hunter for {project_name}.
+Project directory: {project_dir}
+
+Your job: find and fix bugs for the assigned scan type.
+
+Rules:
+- Report each bug: severity (critical/high/medium/low), file, line, root cause, fix applied.
+- Max {max_changes} bugs per cycle. Security bugs highest priority.
+- WCAG contrast: min 4.5:1 small text, 3:1 large. Never rgba(255,255,255,0.45) on dark backgrounds.
+- Never introduce new bugs while fixing.
+- Commit with descriptive message.
+- Do NOT deploy — WOPR decides.
+{memory}
+{wiki}
+{gate_findings}""",
+
+    "wopr": """You are {agent_name} — QA gatekeeper for {project_name}.
+You review all proposed changes before they go live.
+
+Your verdicts:
+- GO: changes are correct and safe. Deploy.
+- CAUTION: mostly safe but needs manual review. Deploy but flag.
+- REVERT: changes would break the project or introduce security issues. Reject.
+
+Rules:
+- Be conservative. When in doubt, CAUTION not GO.
+- Check WCAG compliance (4.5:1 small, 3:1 large).
+- Verify no secrets or credentials in code.
+- Validate existing functionality not broken.
+- Review git diff HEAD~1 and git log -1 before deciding.
+{memory}
+{wiki}""",
+}
+
+# Skills that produce verdicts (gate phase)
+GATE_SKILLS = {"qa", "review", "gate", "approval", "wopr"}
+
+# Default phase mapping
+PHASE_MAP = {
+    "qa": "gate",
+    "review": "gate",
+    "gate": "gate",
+    "approval": "gate",
+    "wopr": "gate",
+    "vulcan": "work",
+    "lightman": "work",
+}
+
+
+def agents_from_config(config: dict) -> list[Agent]:
+    """Create Agent instances from config.
+
+    Each agent entry in the YAML is a skill. The skill name determines
+    the default system prompt, phase, and verdict format.
+    """
+    agents_config = config.get("agents", {})
+    max_changes = config.get("sprint", {}).get("max_changes_per_cycle", 5)
+
+    agents = []
+    for key, agent_conf in agents_config.items():
+        if isinstance(agent_conf, str):
+            # Simple format: agents.dev: "role description"
+            agent_conf = {"skill": key, "system_prompt": agent_conf}
+
+        skill = agent_conf.get("skill", agent_conf.get("role", key))
+        name = agent_conf.get("name", key)
+        phase = agent_conf.get("phase", PHASE_MAP.get(skill, "work"))
+        verdict_format = agent_conf.get("verdict_format", skill in GATE_SKILLS)
+
+        # System prompt: user-defined > skill template > generic
+        system_prompt = agent_conf.get(
+            "system_prompt",
+            SKILL_TEMPLATES.get(skill, SKILL_TEMPLATES.get("dev"))
+        )
+        tasks = agent_conf.get("tasks", [])
+
+        # run_when_blocked: default True for bug-hunter/security, False for others
+        default_rwb = skill in ("bug-hunter", "security")
+        run_when_blocked = agent_conf.get("run_when_blocked", default_rwb)
+
+        agents.append(Agent(
+            name=name,
+            skill=skill,
+            system_prompt_template=system_prompt,
+            tasks=tasks,
+            max_changes=agent_conf.get("max_changes", max_changes),
+            phase=phase,
+            verdict_format=verdict_format,
+            run_when_blocked=run_when_blocked,
+        ))
+
+    return agents

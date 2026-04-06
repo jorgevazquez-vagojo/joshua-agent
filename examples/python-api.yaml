@@ -1,0 +1,55 @@
+# Python API sprint config (FastAPI/Django/Flask)
+# Usage: joshua run examples/python-api.yaml
+
+project:
+  name: my-api
+  path: ~/my-api
+  deploy: "docker compose build --no-cache && docker compose up -d"
+  health_url: http://localhost:8000/health
+
+runner:
+  type: aider  # Using Aider
+  timeout: 1800
+  model: claude-sonnet-4-20250514
+
+agents:
+  builder:
+    name: lightman
+    role: builder
+    tasks:
+      - "Review API endpoint design and REST conventions"
+      - "Audit database models and migrations"
+      - "Check test coverage and add missing tests"
+      - "Review error handling and HTTP status codes"
+      - "Optimize database queries (N+1, missing indexes)"
+      - "Audit authentication and permission decorators"
+      - "Review logging and observability"
+      - "Check configuration management and env vars"
+  debugger:
+    name: vulcan
+    role: debugger
+    tasks:
+      - "Scan for SQL injection and ORM misuse"
+      - "Check for unvalidated user input"
+      - "Audit rate limiting and throttling"
+      - "Scan for hardcoded credentials"
+      - "Check for race conditions in async code"
+      - "Audit CORS policy and security headers"
+  qa:
+    name: wopr
+    role: qa
+
+sprint:
+  cycle_sleep: 300
+  max_changes_per_cycle: 5
+  digest_every: 12
+
+memory:
+  enabled: true
+
+tracker:
+  type: jira
+  base_url: ${JIRA_BASE_URL}
+  user: ${JIRA_USER}
+  token: ${JIRA_TOKEN}
+  project_key: MYPROJ

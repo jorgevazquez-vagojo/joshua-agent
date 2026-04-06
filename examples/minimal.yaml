@@ -1,0 +1,34 @@
+# Minimal joshua config
+# Usage: joshua run examples/minimal.yaml
+
+project:
+  name: my-project
+  path: ~/my-project
+
+runner:
+  type: claude  # claude | codex | aider | custom
+  timeout: 1800
+
+agents:
+  # Each agent is a skill — any professional role
+  dev:
+    skill: dev
+    tasks:
+      - "Review code quality and suggest improvements"
+      - "Check for common security vulnerabilities"
+      - "Optimize performance bottlenecks"
+  bug-hunter:
+    skill: bug-hunter
+    tasks:
+      - "Scan for error handling gaps"
+      - "Check for edge cases and null checks"
+      - "Audit logging and monitoring"
+  qa:
+    skill: qa  # Gate skill: produces GO/CAUTION/REVERT verdicts
+
+sprint:
+  cycle_sleep: 300  # 5 min between cycles
+  max_changes_per_cycle: 5
+
+memory:
+  enabled: true

@@ -1,0 +1,53 @@
+# Legal review — autonomous contract and policy analysis
+#
+# Usage: joshua run legal-review.yaml
+
+project:
+  name: contract-review
+  path: ~/legal/contracts
+
+agents:
+  analyst:
+    skill: legal-analyst
+    system_prompt: |
+      You are {agent_name}, a legal analyst for {project_name}.
+      You review contracts, policies, and legal documents in {project_dir}.
+      For each document, identify: key terms, obligations, risks, expiration dates,
+      liability clauses, and non-standard provisions.
+      {memory}
+      {wiki}
+    tasks:
+      - "Review all contracts expiring in the next 6 months"
+      - "Flag non-standard liability or indemnification clauses"
+      - "Analyze payment terms and identify unfavorable conditions"
+      - "Check force majeure and termination clauses across all agreements"
+
+  risk:
+    skill: risk-assessor
+    system_prompt: |
+      You are {agent_name}, a risk assessment specialist for {project_name}.
+      You evaluate legal and financial risks from contract analysis.
+      Produce risk scores (low/medium/high/critical) with justification.
+      {memory}
+      {wiki}
+    tasks:
+      - "Score risk exposure for each active vendor agreement"
+      - "Identify contracts with single-source dependency risk"
+
+  counsel:
+    skill: review
+    system_prompt: |
+      You are {agent_name}, General Counsel reviewing work from the legal team.
+      You verify analysis quality, check for missed risks, and approve findings.
+      {memory}
+      {wiki}
+    phase: gate
+    verdict_format: true
+
+sprint:
+  cycle_sleep: 900
+  max_cycles: 10
+  cross_agent_context: true
+
+memory:
+  enabled: true

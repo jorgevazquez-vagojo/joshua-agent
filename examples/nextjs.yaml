@@ -1,0 +1,56 @@
+# Next.js application sprint config
+# Usage: joshua run examples/nextjs.yaml
+
+project:
+  name: my-nextjs-app
+  path: ~/my-nextjs-app
+  deploy: "npm run build && npm start"
+  health_url: http://localhost:3000/api/health
+
+runner:
+  type: codex  # Using OpenAI Codex
+  timeout: 1800
+  model: o3-mini
+
+agents:
+  builder:
+    name: lightman
+    role: builder
+    tasks:
+      - "Review React component architecture and suggest improvements"
+      - "Audit API routes for proper error handling and validation"
+      - "Check TypeScript types for strictness and completeness"
+      - "Review data fetching patterns (SSR vs CSR vs ISR)"
+      - "Optimize bundle size and code splitting"
+      - "Audit authentication and authorization flows"
+      - "Check for proper loading and error states in components"
+      - "Review database queries and ORM usage"
+  debugger:
+    name: vulcan
+    role: debugger
+    tasks:
+      - "Scan for unhandled promise rejections and async errors"
+      - "Check for memory leaks in useEffect cleanup"
+      - "Audit API routes for missing auth middleware"
+      - "Scan for hardcoded secrets or API keys"
+      - "Check for N+1 query problems"
+      - "Audit CORS and security headers"
+  qa:
+    name: wopr
+    role: qa
+
+sprint:
+  cycle_sleep: 600  # 10 minutes between cycles
+  max_changes_per_cycle: 3
+
+memory:
+  enabled: true
+
+notifications:
+  type: slack
+  webhook_url: ${SLACK_WEBHOOK_URL}
+
+tracker:
+  type: github
+  repo: "myorg/my-nextjs-app"
+  token: ${GITHUB_TOKEN}

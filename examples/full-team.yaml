@@ -1,0 +1,88 @@
+# Full team joshua sprint — multiple specialized skills
+# Usage: joshua run examples/full-team.yaml
+#
+# This example shows how to compose a full team of AI agents,
+# each with a distinct professional skill. Any skill is valid.
+
+project:
+  name: my-saas-app
+  path: ~/my-saas-app
+  deploy: "docker compose build && docker compose up -d"
+  health_url: http://localhost:3000/health
+
+runner:
+  type: claude
+  timeout: 1800
+
+agents:
+  # ── Work skills (phase: work) ──────────────────────────
+  dev:
+    skill: dev
+    name: lightman
+    tasks:
+      - "Implement next feature from backlog"
+      - "Refactor for better separation of concerns"
+      - "Add missing input validation"
+      - "Improve error messages and user feedback"
+
+  bug-hunter:
+    skill: bug-hunter
+    name: vulcan
+    tasks:
+      - "Scan for unhandled exceptions"
+      - "Check for race conditions in async code"
+      - "Audit database queries for N+1 problems"
+      - "Scan for memory leaks"
+
+  security:
+    skill: security
+    name: shield
+    tasks:
+      - "OWASP Top 10 audit"
+      - "Check authentication and authorization flows"
+      - "Scan for hardcoded secrets and credentials"
+      - "Audit input sanitization and output encoding"
+
+  perf:
+    skill: perf
+    name: turbo
+    tasks:
+      - "Profile API response times"
+      - "Check database query performance"
+      - "Audit caching strategy"
+      - "Review bundle size and code splitting"
+
+  pm:
+    skill: pm
+    name: tracker
+    phase: work  # PM produces reports, not verdicts
+    tasks:
+      - "Review recent changes and summarize progress"
+      - "Identify technical debt and risks"
+      - "Check test coverage trends"
+
+  # ── Gate skills (phase: gate) ──────────────────────────
+  qa:
+    skill: qa
+    name: wopr
+    # phase: gate (auto-detected from skill name)
+    # verdict_format: true (auto-detected)
+
+sprint:
+  cycle_sleep: 600  # 10 min between cycles
+  max_changes_per_cycle: 3
+  digest_every: 12
+
+memory:
+  enabled: true
+  evolve_at: "10:00"
+
+notifications:
+  type: telegram
+  token: ${TELEGRAM_TOKEN}
+  chat_id: ${TELEGRAM_CHAT_ID}
+
+tracker:
+  type: github
+  repo: "myorg/my-saas-app"
+  token: ${GITHUB_TOKEN}

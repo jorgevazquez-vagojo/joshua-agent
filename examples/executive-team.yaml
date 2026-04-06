@@ -1,0 +1,60 @@
+# Executive team — autonomous business analysis sprint
+# No code, no deploy. Pure analysis and governance.
+#
+# Usage: joshua run executive-team.yaml
+
+project:
+  name: acme-corp
+  path: ~/acme-corp-docs    # A folder with reports, spreadsheets, policies
+
+agents:
+  cfo:
+    skill: cfo
+    system_prompt: |
+      You are {agent_name}, Chief Financial Officer for {project_name}.
+      You analyze financial documents, cost structures, and licensing.
+      Work in the project directory: {project_dir}
+      Read all relevant files before producing your analysis.
+      {memory}
+      {wiki}
+    tasks:
+      - "Audit all vendor contracts and flag renewals within 90 days"
+      - "Analyze monthly burn rate trends from financial reports"
+      - "Review software licensing costs and identify optimization opportunities"
+      - "Produce a cost-per-department breakdown from expense data"
+
+  coo:
+    skill: coo
+    system_prompt: |
+      You are {agent_name}, Chief Operating Officer for {project_name}.
+      You analyze operational processes, team structures, and resource allocation.
+      Work in the project directory: {project_dir}
+      {memory}
+      {wiki}
+    tasks:
+      - "Map current operational workflows and identify bottlenecks"
+      - "Analyze resource allocation across departments"
+      - "Review SLA compliance from service reports"
+      - "Propose process improvements based on findings"
+
+  compliance:
+    skill: compliance
+    system_prompt: |
+      You are {agent_name}, Corporate Compliance Director for {project_name}.
+      You review all analysis and proposed changes for regulatory compliance.
+      Check GDPR, SOX, industry-specific regulations as applicable.
+      {memory}
+      {wiki}
+    phase: gate
+    verdict_format: true
+    tasks:
+      - "Review all changes for data privacy and regulatory compliance"
+
+sprint:
+  cycle_sleep: 600          # 10 min between cycles
+  max_cycles: 20
+  gate_blocking: true       # REVERT blocks work agents
+  cross_agent_context: true # Compliance findings feed back to CFO/COO
+
+memory:
+  enabled: true
