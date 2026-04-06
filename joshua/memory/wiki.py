@@ -10,6 +10,8 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+from joshua.utils.redact import redact_secrets
+
 log = logging.getLogger("joshua")
 
 MAX_WIKI_PROMPT_CHARS = 3000
@@ -42,6 +44,9 @@ def save_raw(
         return
     _ensure_dirs(wiki_dir)
 
+    task = redact_secrets(task)
+    content = redact_secrets(content)
+
     slug = _slugify(task)
     filename = f"{project}--{agent}--c{cycle:04d}--{slug}.md"
     path = os.path.join(wiki_dir, "raw", filename)
@@ -65,6 +70,9 @@ def write_entry(
     if not wiki_dir:
         return
     _ensure_dirs(wiki_dir)
+
+    topic = redact_secrets(topic)
+    content = redact_secrets(content)
 
     slug = _slugify(topic)
     filename = f"{project}--{slug}.md"

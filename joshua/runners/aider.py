@@ -1,8 +1,5 @@
 """Aider CLI runner."""
 
-import subprocess
-import time
-
 from joshua.runners.base import LLMRunner, RunResult
 
 
@@ -34,31 +31,12 @@ class AiderRunner(LLMRunner):
         if model:
             cmd.extend(["--model", model])
 
-        start = time.monotonic()
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                cwd=cwd,
-            )
-            duration = time.monotonic() - start
-            return RunResult(
-                success=result.returncode == 0,
-                output=result.stdout.strip(),
-                exit_code=result.returncode,
-                duration_seconds=round(duration, 1),
-                error=result.stderr.strip() if result.returncode != 0 else None,
-            )
-        except subprocess.TimeoutExpired:
-            return RunResult(
-                success=False, output="", exit_code=-1,
-                duration_seconds=float(timeout),
-                error=f"Timeout after {timeout}s",
-            )
-        except FileNotFoundError:
-            return RunResult(
-                success=False, output="", exit_code=-1, duration_seconds=0,
-                error=f"Binary not found: {binary}. Install: pip install aider-chat",
-            )
+        return self._run_command(
+            cmd,
+            cwd=cwd,
+            timeout=timeout,
+            success_requires_output=False,
+            binary_not_found_message=(
+                f"Binary not found: {binary}. Install: pip install aider-chat"
+            ),
+        )

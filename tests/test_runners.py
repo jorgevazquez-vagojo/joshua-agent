@@ -29,13 +29,14 @@ class TestClaudeRunner:
         runner = ClaudeRunner({"type": "claude"})
         assert runner.name == "claude"
 
-    @patch("subprocess.run")
-    def test_successful_run(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout="Changes applied successfully.\nFixed 3 bugs.",
-            stderr="",
-        )
+    @patch("subprocess.Popen")
+    def test_successful_run(self, mock_popen):
+        process = MagicMock()
+        process.communicate.return_value = ("Changes applied successfully.\nFixed 3 bugs.", "")
+        process.returncode = 0
+        process.pid = 123
+        process.poll.return_value = 0
+        mock_popen.return_value = process
         runner = ClaudeRunner({"type": "claude", "timeout": 60})
         result = runner.run("fix bugs", "/tmp/project")
         assert result.success
@@ -43,56 +44,85 @@ class TestClaudeRunner:
         assert result.exit_code == 0
 
         # Verify claude was called correctly
-        cmd = mock_run.call_args[0][0]
+        cmd = mock_popen.call_args[0][0]
         assert cmd[0] == "claude"
         assert "-p" in cmd
 
-    @patch("subprocess.run")
-    def test_failed_run(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=1,
-            stdout="",
-            stderr="Authentication failed",
-        )
+    @patch("subprocess.Popen")
+    def test_failed_run(self, mock_popen):
+        process = MagicMock()
+        process.communicate.return_value = ("", "Authentication failed")
+        process.returncode = 1
+        process.pid = 123
+        process.poll.return_value = 1
+        mock_popen.return_value = process
         runner = ClaudeRunner({"type": "claude"})
         result = runner.run("fix bugs", "/tmp")
         assert not result.success
         assert result.exit_code == 1
         assert "Authentication" in result.error
 
-    @patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="claude", timeout=10))
-    def test_timeout(self, mock_run):
+    @patch("subprocess.Popen")
+    def test_timeout(self, mock_popen):
+        process = MagicMock()
+        process.communicate.side_effect = [
+            subprocess.TimeoutExpired(cmd="claude", timeout=10),
+            ("", ""),
+        ]
+        process.returncode = -9
+        process.pid = 123
+        process.poll.return_value = None
+        mock_popen.return_value = process
         runner = ClaudeRunner({"type": "claude", "timeout": 10})
         result = runner.run("fix bugs", "/tmp")
         assert not result.success
         assert "Timeout" in result.error
 
-    @patch("subprocess.run", side_effect=FileNotFoundError)
-    def test_binary_not_found(self, mock_run):
+    @patch("subprocess.Popen", side_effect=FileNotFoundError)
+    def test_binary_not_found(self, mock_popen):
         runner = ClaudeRunner({"type": "claude"})
         result = runner.run("fix bugs", "/tmp")
         assert not result.success
         assert "not found" in result.error
 
-    @patch("subprocess.run")
-    def test_model_and_tools_passed(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+    @patch("subprocess.Popen")
+    def test_model_and_tools_passed(self, mock_popen):
+        process = MagicMock()
+        process.communicate.return_value = ("ok", "")
+        process.returncode = 0
+        process.pid = 123
+        process.poll.return_value = 0
+        mock_popen.return_value = process
         runner = ClaudeRunner({
             "type": "claude",
             "model": "sonnet",
             "allowed_tools": ["Bash", "Read"],
         })
         runner.run("task", "/tmp")
-        cmd = mock_run.call_args[0][0]
+        cmd = mock_popen.call_args[0][0]
         assert "--model" in cmd
         assert "sonnet" in cmd
         assert "--allowedTools" in cmd
 
+    def test_cancel_terminates_active_process(self):
+        runner = ClaudeRunner({"type": "claude"})
+        process = MagicMock()
+        process.poll.return_value = None
+        process.pid = 123
+        runner._active_process = process
+        runner.cancel()
+        assert runner._cancel_requested is True
+
 
 class TestCustomRunner:
-    @patch("subprocess.run")
-    def test_command_template(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=0, stdout="result", stderr="")
+    @patch("subprocess.Popen")
+    def test_command_template(self, mock_popen):
+        process = MagicMock()
+        process.communicate.return_value = ("result", "")
+        process.returncode = 0
+        process.pid = 123
+        process.poll.return_value = 0
+        mock_popen.return_value = process
         runner = CustomRunner({
             "type": "custom",
             "command": "echo {prompt_file}",

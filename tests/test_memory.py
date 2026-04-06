@@ -73,6 +73,15 @@ class TestLessons:
             for lesson in lessons:
                 assert lesson["errors_found"] or lesson["patterns_good"]
 
+    def test_extract_lessons_redacts_secrets(self, tmp_dir):
+        output = "Error with API_KEY=sk-1234567890abcdef and Bearer verysecretvalue"
+        extract_lessons("dev", "fix auth token=abc123456", output, True, 1, tmp_dir)
+
+        content = (tmp_dir / "memory" / "dev.json").read_text()
+        assert "sk-1234567890abcdef" not in content
+        assert "verysecretvalue" not in content
+        assert "[REDACTED" in content
+
     def test_build_memory_prompt_empty(self, tmp_dir):
         result = build_memory_prompt("nonexistent", tmp_dir)
         assert result == ""
@@ -112,6 +121,23 @@ class TestWiki:
         content = files[0].read_text()
         assert "agent: dev" in content
         assert "Found bug" in content
+
+    def test_save_raw_redacts_secrets(self, tmp_dir):
+        wiki_dir = str(tmp_dir / "wiki")
+        save_raw(
+            "dev",
+            1,
+            "rotate password=hunter2",
+            "Authorization: Bearer verysecretvalue\nAPI_KEY=sk-abcdef1234567890",
+            "myproject",
+            wiki_dir,
+        )
+
+        content = next((Path(wiki_dir) / "raw").glob("*.md")).read_text()
+        assert "hunter2" not in content
+        assert "verysecretvalue" not in content
+        assert "sk-abcdef1234567890" not in content
+        assert "[REDACTED" in content
 
     def test_write_entry(self, tmp_dir):
         wiki_dir = str(tmp_dir / "wiki")

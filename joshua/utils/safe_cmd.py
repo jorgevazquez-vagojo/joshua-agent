@@ -5,7 +5,9 @@ import logging
 import os
 import re
 import shlex
+import signal
 import subprocess
+import time
 from typing import Optional
 
 log = logging.getLogger("joshua")
@@ -88,6 +90,9 @@ def run_command(
     timeout: int = 300,
     dry_run: bool = False,
     extra_env: Optional[dict] = None,
+    cancel_event=None,
+    on_process_start=None,
+    on_process_end=None,
 ) -> tuple[bool, str]:
     """
     Run a deploy/revert command safely.
@@ -115,30 +120,59 @@ def run_command(
         return True, "[dry-run] skipped"
 
     try:
-        result = subprocess.run(
+        process = subprocess.Popen(
             args,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
             cwd=cwd,
             env=env,
+            start_new_session=(os.name != "nt"),
         )
-        if result.returncode == 0:
-            return True, result.stdout.strip()
-        else:
-            # Redact secrets from error output before logging
-            stderr = result.stderr[:1000]
-            for k, v in env.items():
-                if _SECRET_PATTERN.search(k) and v and len(v) > 4:
-                    stderr = stderr.replace(v, "***")
-            log.error(f"Command failed (exit {result.returncode}): {stderr}")
-            return False, stderr
-    except subprocess.TimeoutExpired:
-        log.error(f"Command timed out after {timeout}s")
-        return False, f"Timeout after {timeout}s"
+        if on_process_start:
+            on_process_start(process)
+
+        start = time.monotonic()
+        timed_out = False
+        cancelled = False
+        while True:
+            try:
+                stdout, stderr = process.communicate(timeout=0.2)
+                break
+            except subprocess.TimeoutExpired:
+                if cancel_event and cancel_event.is_set():
+                    cancelled = True
+                    _terminate_process(process)
+                    stdout, stderr = process.communicate()
+                    break
+                if time.monotonic() - start >= timeout:
+                    timed_out = True
+                    _terminate_process(process)
+                    stdout, stderr = process.communicate()
+                    break
+
+        if cancelled:
+            log.info("Command cancelled")
+            return False, "Cancelled"
+        if timed_out:
+            log.error(f"Command timed out after {timeout}s")
+            return False, f"Timeout after {timeout}s"
+        if process.returncode == 0:
+            return True, stdout.strip()
+
+        # Redact secrets from error output before logging
+        stderr = stderr[:1000]
+        for k, v in env.items():
+            if _SECRET_PATTERN.search(k) and v and len(v) > 4:
+                stderr = stderr.replace(v, "***")
+        log.error(f"Command failed (exit {process.returncode}): {stderr}")
+        return False, stderr
     except FileNotFoundError:
         log.error(f"Command not found: {args[0]}")
         return False, f"Command not found: {args[0]}"
+    finally:
+        if 'process' in locals() and on_process_end:
+            on_process_end(process)
 
 
 def extend_allowlist(extra: list[str]) -> None:
@@ -150,3 +184,18 @@ def extend_allowlist(extra: list[str]) -> None:
 _extra = os.environ.get("JOSHUA_ALLOWED_COMMANDS", "")
 if _extra:
     extend_allowlist([c.strip() for c in _extra.split(",") if c.strip()])
+
+
+def _terminate_process(process: subprocess.Popen[str]):
+    """Terminate a running command safely."""
+    if process.poll() is not None:
+        return
+    try:
+        if os.name != "nt":
+            os.killpg(process.pid, signal.SIGTERM)
+        else:
+            process.terminate()
+    except ProcessLookupError:
+        return
+    except OSError:
+        process.terminate()

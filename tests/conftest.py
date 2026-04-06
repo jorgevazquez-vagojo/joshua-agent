@@ -36,7 +36,7 @@ def minimal_config(tmp_dir):
             "qa": {"skill": "qa"},
         },
         "sprint": {
-            "cycle_sleep": 1,
+            "cycle_sleep": 0,
             "max_changes_per_cycle": 3,
             "max_cycles": 1,
         },

@@ -6,15 +6,16 @@ The server is stateless — reads from DB, delegates to ProcessManager.
     joshua serve --port 8100
 """
 
-import hmac
 import ipaddress
 import logging
 import os
+import secrets
 import socket
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Depends, Header, Query
 from pydantic import BaseModel, ValidationError, field_validator
@@ -49,7 +50,7 @@ def verify_token(x_internal_token: str = Header(default="")):
             status_code=503,
             detail="Server not configured: set JOSHUA_INTERNAL_TOKEN env var before starting."
         )
-    if not hmac.compare_digest(x_internal_token, INTERNAL_TOKEN):
+    if not x_internal_token or not secrets.compare_digest(x_internal_token, INTERNAL_TOKEN):
         raise HTTPException(status_code=401, detail="Invalid or missing X-Internal-Token")
 
 
@@ -81,7 +82,6 @@ async def lifespan(app: FastAPI):
     _supervisor.stop()
     _pm.stop_all()
     _pm.join_all(timeout=30)
-    # Mark any still-running as stopped
     for row in _db.get_running_sprints():
         _db.complete_sprint(row["sprint_id"], "stopped")
     log.info("Shutdown complete")
@@ -97,6 +97,39 @@ app = FastAPI(
 
 # ── Models ─────────────────────────────────────────────────────────────
 
+def _validate_callback_url(callback_url: str) -> str:
+    """Validate callback_url against resolved DNS/IP targets."""
+    parsed = urlparse(callback_url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError("callback_url must be an absolute http(s) URL")
+
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        addrinfo = socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError(f"callback_url hostname could not be resolved: {parsed.hostname}") from exc
+
+    seen = set()
+    for _, _, _, _, sockaddr in addrinfo:
+        ip = ipaddress.ip_address(sockaddr[0])
+        if ip in seen:
+            continue
+        seen.add(ip)
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
+            raise ValueError(
+                f"callback_url host resolved to a non-public address: {parsed.hostname}"
+            )
+
+    return callback_url
+
+
 class StartSprintRequest(BaseModel):
     """Sprint config in JSON (same schema as YAML config)."""
     config: dict
@@ -108,28 +141,7 @@ class StartSprintRequest(BaseModel):
     def validate_callback_url(cls, v: str | None) -> str | None:
         if v is None:
             return v
-        from urllib.parse import urlparse
-        parsed = urlparse(v)
-        if parsed.scheme not in ("http", "https"):
-            raise ValueError("callback_url must use http or https")
-        host = parsed.hostname or ""
-        if not host:
-            raise ValueError("callback_url must have a hostname")
-
-        # Resolve DNS to actual IP — prevents DNS rebinding attacks
-        try:
-            resolved = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
-            ips = {r[4][0] for r in resolved}
-        except socket.gaierror:
-            raise ValueError(f"callback_url hostname cannot be resolved: {host}")
-
-        for ip_str in ips:
-            ip = ipaddress.ip_address(ip_str)
-            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
-                raise ValueError(
-                    f"callback_url resolves to non-public address: {ip_str}"
-                )
-        return v
+        return _validate_callback_url(v)
 
 
 class SprintStatus(BaseModel):
@@ -204,14 +216,12 @@ def start_sprint(req: StartSprintRequest):
     """Start a new sprint in an isolated worker process."""
     config = req.config
 
-    # Validate config version
     if req.config_version != "1":
         raise HTTPException(
             status_code=422,
             detail=f"Unsupported config_version: {req.config_version}. Supported: ['1']"
         )
 
-    # Validate config schema
     try:
         JoshuaConfig.model_validate(config)
     except ValidationError as e:
@@ -224,7 +234,6 @@ def start_sprint(req: StartSprintRequest):
             detail={"message": "Config validation failed", "errors": errors}
         )
 
-    # Validate project path
     project_path = config.get("project", {}).get("path", "")
     if not project_path:
         raise HTTPException(
@@ -237,7 +246,6 @@ def start_sprint(req: StartSprintRequest):
             detail={"message": f"project.path does not exist: {project_path}"}
         )
 
-    # Rate limiting
     running_count = _pm.running_count() if _pm else 0
     if running_count >= MAX_CONCURRENT_SPRINTS:
         raise HTTPException(
@@ -250,10 +258,7 @@ def start_sprint(req: StartSprintRequest):
     project_name = config.get("project", {}).get("name", "unknown")
     started_at = datetime.now().isoformat()
 
-    # Persist to DB first
     _db.insert_sprint(sprint_id, project_name, config, started_at)
-
-    # Spawn isolated worker process
     pid = _pm.spawn(sprint_id, config, callback_url=req.callback_url)
     _db.update_pid(sprint_id, pid)
 

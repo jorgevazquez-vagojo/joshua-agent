@@ -8,12 +8,11 @@ import json
 import logging
 import os
 import re
-import signal
-import subprocess
+import threading
 import time
 from datetime import datetime
-from pathlib import Path
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 from joshua.agents import Agent, agents_from_config
 from joshua.config import load_config
@@ -25,6 +24,7 @@ from joshua.integrations.git import GitOps
 from joshua.integrations.notifications import notifier_factory
 from joshua.integrations.trackers import tracker_factory
 from joshua.utils.health import check_health
+from joshua.utils.redact import redact_secrets
 from joshua.utils.safe_cmd import run_command
 from joshua.utils.preflight import run_preflight, check_memory, wait_for_memory
 from joshua.gate_contract import GateVerdict, GATE_JSON_SCHEMA
@@ -82,6 +82,9 @@ class Sprint:
 
         # Hooks (set by server or external integrations)
         self._stop_requested = False
+        self._stop_event = threading.Event()
+        self._active_command_process = None
+        self._command_lock = threading.Lock()
         self.on_cycle_complete = None  # callable(cycle_data: dict) -> None
         self.context_provider = None   # callable(cycle: int) -> str
 
@@ -126,7 +129,41 @@ class Sprint:
     def stop(self):
         """Request graceful stop after current cycle completes."""
         self._stop_requested = True
+        self._stop_event.set()
+        self.runner.cancel()
+        self._terminate_active_command()
         self.sprint_logger.info("Stop requested — will finish after current cycle")
+
+    def _wait_or_stop(self, seconds: float) -> bool:
+        """Wait up to N seconds, returning True if a stop was requested."""
+        if seconds <= 0:
+            return self._stop_requested
+        return self._stop_event.wait(seconds)
+
+    def _set_active_command(self, process):
+        with self._command_lock:
+            self._active_command_process = process
+
+    def _clear_active_command(self, process):
+        with self._command_lock:
+            if self._active_command_process is process:
+                self._active_command_process = None
+
+    def _terminate_active_command(self):
+        with self._command_lock:
+            process = self._active_command_process
+        if process is None or process.poll() is not None:
+            return
+        try:
+            if os.name != "nt":
+                import signal
+                os.killpg(process.pid, signal.SIGTERM)
+            else:
+                process.terminate()
+        except ProcessLookupError:
+            return
+        except OSError:
+            process.terminate()
 
     def run(self):
         """Run the sprint loop until stopped, max_cycles, or max_hours reached."""
@@ -204,7 +241,8 @@ class Sprint:
                     # Exponential backoff
                     backoff = min(self.cycle_sleep * (2 ** self.consecutive_errors), self.max_backoff)
                     self.sprint_logger.info(f"Backing off {backoff}s...")
-                    time.sleep(backoff)
+                    if self._wait_or_stop(backoff):
+                        break
                     continue
 
                 self._save_checkpoint()
@@ -229,12 +267,24 @@ class Sprint:
                 # Sleep (longer after REVERT)
                 sleep_time = self.revert_sleep if verdict == "REVERT" else self.cycle_sleep
                 self.sprint_logger.info(f"Sleeping {sleep_time}s before next cycle...")
-                time.sleep(sleep_time)
+                if self._wait_or_stop(sleep_time):
+                    break
 
         except KeyboardInterrupt:
             self.sprint_logger.info("Sprint interrupted by user")
         finally:
+            self.runner.cancel()
+            self._terminate_active_command()
             self._save_checkpoint()
+            if lock_fd is not None:
+                try:
+                    lock_fd.close()
+                except OSError:
+                    pass
+            try:
+                lock_path.unlink(missing_ok=True)
+            except OSError:
+                pass
             self.sprint_logger.info(f"Sprint ended at cycle {self.cycle}. Stats: {self.stats}")
             self.notifier.notify_event("stop",
                 f"Ended at cycle {self.cycle}. Stats: {self.stats}",
@@ -259,7 +309,8 @@ class Sprint:
                 self.sprint_logger.warning("Health check failed — attempting recovery")
                 if self.recovery_deploy:
                     self._deploy(self.recovery_deploy)
-                    time.sleep(10)
+                    if self._wait_or_stop(10):
+                        return "CAUTION"
                 if not check_health(self.health_url):
                     self._consecutive_health_failures += 1
                     log.error(
@@ -273,6 +324,7 @@ class Sprint:
                     if self._consecutive_health_failures >= self.health_check_max_failures:
                         log.error("Max consecutive health failures reached — stopping sprint")
                         self._stop_requested = True
+                        self._stop_event.set()
                     return "CAUTION"
             else:
                 self._consecutive_health_failures = 0
@@ -394,7 +446,7 @@ class Sprint:
                     f"Low memory before [{next_agent}] — running anyway")
         if self.agent_stagger:
             log.info(f"Stagger: waiting {self.agent_stagger}s before [{next_agent}]")
-            time.sleep(self.agent_stagger)
+            self._wait_or_stop(self.agent_stagger)
 
     def _run_agent_with_retry(self, agent: Agent, task: str,
                                context: dict) -> RunResult:
@@ -405,7 +457,15 @@ class Sprint:
 
         for attempt in range(1, self.retries + 1):
             log.info(f"[{agent.name}] Retry {attempt}/{self.retries}")
-            time.sleep(5 * attempt)
+            if self._wait_or_stop(5 * attempt):
+                return RunResult(
+                    success=False,
+                    output="",
+                    exit_code=-1,
+                    duration_seconds=0,
+                    error="Cancelled",
+                    error_type="cancelled",
+                )
             result = self._run_agent(agent, task, context)
             if result.success:
                 return result
@@ -445,10 +505,13 @@ class Sprint:
         if not self.memory_enabled:
             return
 
+        task = redact_secrets(task)
+        output = redact_secrets(result.output)
+
         extract_lessons(
             agent_name=agent.name,
             task=task,
-            output=result.output,
+            output=output,
             success=result.success,
             cycle=self.cycle,
             state_dir=self.state_dir,
@@ -457,7 +520,7 @@ class Sprint:
             agent=agent.name,
             cycle=self.cycle,
             task=task,
-            content=result.output,
+            content=output,
             project=self.project_name,
             wiki_dir=str(self.state_dir / "wiki"),
         )
@@ -582,6 +645,9 @@ class Sprint:
             cwd=self.project_dir,
             timeout=300,
             dry_run=self.no_deploy,
+            cancel_event=self._stop_event,
+            on_process_start=self._set_active_command,
+            on_process_end=self._clear_active_command,
         )
         if not success and not self.no_deploy:
             log.error(f"Deploy failed: {output}")
