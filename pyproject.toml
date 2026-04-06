@@ -10,7 +10,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [
-    {name = "Jorge Vazquez", email = "jorgevazquez@users.noreply.github.com"},
+    {name = "Jorge Vazquez", email = "jorgevazquez-vagojo@users.noreply.github.com"},
 ]
 keywords = ["ai", "agents", "autonomous", "multi-agent", "sprint", "llm", "claude", "codex", "aider", "skills", "quality-gate"]
 classifiers = [
