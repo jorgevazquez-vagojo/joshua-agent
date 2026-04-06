@@ -27,6 +27,7 @@ from joshua.integrations.trackers import tracker_factory
 from joshua.utils.health import check_health
 from joshua.utils.safe_cmd import run_command
 from joshua.utils.preflight import run_preflight, check_memory, wait_for_memory
+from joshua.gate_contract import GateVerdict, GATE_JSON_SCHEMA
 
 log = logging.getLogger("joshua")
 
@@ -93,13 +94,39 @@ class Sprint:
         self.last_gate_issues: list = []
         self.last_gate_severity: str = "none"
         self.last_gate_recommended_action: str = ""
+        self.last_gate_confidence: float | None = None
         self.last_verdict_source: str = "none"  # "json" | "legacy" | "default"
         self.consecutive_errors = 0
+
+        # Per-sprint logger — replaced by setup_sprint_logger() when run via server
+        self.sprint_id: str = ""
+        self.sprint_logger = log
+
+    def setup_sprint_logger(self, sprint_id: str, log_dir: Path) -> None:
+        """Attach a per-sprint rotating file handler.
+
+        Called by the server after sprint construction. The sprint logger is a
+        child of the root 'joshua' logger (propagate=True) so messages appear
+        in both the sprint file and the main server log.
+        """
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / f"sprint-{sprint_id}.log"
+        handler = RotatingFileHandler(
+            str(log_file), maxBytes=10 * 1024 * 1024, backupCount=3
+        )
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        sprint_logger = logging.getLogger(f"joshua.sprint.{sprint_id}")
+        sprint_logger.addHandler(handler)
+        sprint_logger.setLevel(logging.INFO)
+        sprint_logger.propagate = True
+        self.sprint_id = sprint_id
+        self.sprint_logger = sprint_logger
+        self.sprint_logger.info(f"Sprint {sprint_id} logger initialized → {log_file}")
 
     def stop(self):
         """Request graceful stop after current cycle completes."""
         self._stop_requested = True
-        log.info("Stop requested — will finish after current cycle")
+        self.sprint_logger.info("Stop requested — will finish after current cycle")
 
     def run(self):
         """Run the sprint loop until stopped, max_cycles, or max_hours reached."""
@@ -124,9 +151,9 @@ class Sprint:
             lock_fd = open(lock_path, "w")
         lock_path.write_text(str(os.getpid()))
 
-        log.info(f"Sprint started for {self.project_name} at {self.project_dir}")
-        log.info(f"Runner: {self.runner.name} | Agents: {[a.name for a in self.agents]}")
-        log.info(f"Cycle sleep: {self.cycle_sleep}s | Memory: {self.memory_enabled}")
+        self.sprint_logger.info(f"Sprint started for {self.project_name} at {self.project_dir}")
+        self.sprint_logger.info(f"Runner: {self.runner.name} | Agents: {[a.name for a in self.agents]}")
+        self.sprint_logger.info(f"Cycle sleep: {self.cycle_sleep}s | Memory: {self.memory_enabled}")
 
         self.notifier.notify_event("start",
             f"Sprint started — {len(self.agents)} agents, runner={self.runner.name}",
@@ -139,19 +166,19 @@ class Sprint:
                 self.cycle += 1
 
                 if self.max_cycles and self.cycle > self.max_cycles:
-                    log.info(f"Reached max_cycles ({self.max_cycles}). Stopping.")
+                    self.sprint_logger.info(f"Reached max_cycles ({self.max_cycles}). Stopping.")
                     break
 
                 if self.max_hours:
                     elapsed_h = (time.monotonic() - start_time) / 3600
                     if elapsed_h >= self.max_hours:
-                        log.info(f"Reached max_hours ({self.max_hours}h). Stopping.")
+                        self.sprint_logger.info(f"Reached max_hours ({self.max_hours}h). Stopping.")
                         break
 
                 # Pre-flight checks
                 warnings = run_preflight(self.config)
                 for w in warnings:
-                    log.warning(f"Preflight: {w}")
+                    self.sprint_logger.warning(f"Preflight: {w}")
 
                 try:
                     verdict = self._run_cycle()
@@ -159,7 +186,7 @@ class Sprint:
                 except Exception as e:
                     self.consecutive_errors += 1
                     self.stats["errors"] += 1
-                    log.error(f"Cycle {self.cycle} error: {e}")
+                    self.sprint_logger.error(f"Cycle {self.cycle} error: {e}")
                     self.notifier.notify_event("crash",
                         f"Cycle {self.cycle} error: {str(e)[:200]}",
                         self.project_name)
@@ -172,7 +199,7 @@ class Sprint:
 
                     # Exponential backoff
                     backoff = min(self.cycle_sleep * (2 ** self.consecutive_errors), self.max_backoff)
-                    log.info(f"Backing off {backoff}s...")
+                    self.sprint_logger.info(f"Backing off {backoff}s...")
                     time.sleep(backoff)
                     continue
 
@@ -189,7 +216,7 @@ class Sprint:
                             "timestamp": datetime.now().isoformat(),
                         })
                     except Exception as e:
-                        log.warning(f"Cycle callback error: {e}")
+                        self.sprint_logger.warning(f"Cycle callback error: {e}")
 
                 # Digest report
                 if self.digest_every and self.cycle % self.digest_every == 0:
@@ -197,14 +224,14 @@ class Sprint:
 
                 # Sleep (longer after REVERT)
                 sleep_time = self.revert_sleep if verdict == "REVERT" else self.cycle_sleep
-                log.info(f"Sleeping {sleep_time}s before next cycle...")
+                self.sprint_logger.info(f"Sleeping {sleep_time}s before next cycle...")
                 time.sleep(sleep_time)
 
         except KeyboardInterrupt:
-            log.info("Sprint interrupted by user")
+            self.sprint_logger.info("Sprint interrupted by user")
         finally:
             self._save_checkpoint()
-            log.info(f"Sprint ended at cycle {self.cycle}. Stats: {self.stats}")
+            self.sprint_logger.info(f"Sprint ended at cycle {self.cycle}. Stats: {self.stats}")
             self.notifier.notify_event("stop",
                 f"Ended at cycle {self.cycle}. Stats: {self.stats}",
                 self.project_name)
@@ -212,13 +239,13 @@ class Sprint:
     def _run_cycle(self) -> str:
         """Execute one full cycle. Returns verdict string."""
         log.info(f"{'='*60}")
-        log.info(f"CYCLE {self.cycle} — {datetime.now().isoformat(timespec='seconds')}")
+        self.sprint_logger.info(f"CYCLE {self.cycle} — {datetime.now().isoformat(timespec='seconds')}")
         log.info(f"{'='*60}")
 
         # Health check — only stop sprint after N consecutive failures
         if self.health_check_enabled and self.health_url:
             if not check_health(self.health_url):
-                log.warning("Health check failed — attempting recovery")
+                self.sprint_logger.warning("Health check failed — attempting recovery")
                 if self.recovery_deploy:
                     self._deploy(self.recovery_deploy)
                     time.sleep(10)
@@ -266,7 +293,7 @@ class Sprint:
             if i > 0:
                 self._stagger_wait(agent.name)
             task = agent.get_task(self.cycle)
-            log.info(f"[{agent.name}] ({agent.skill}) Task: {task[:80]}")
+            self.sprint_logger.info(f"[{agent.name}] ({agent.skill}) Task: {task[:80]}")
             result = self._run_agent_with_retry(agent, task, context)
             output = result.output if result.success else f"[FAILED] {result.error}"
             work_outputs[agent.name] = output
@@ -283,7 +310,7 @@ class Sprint:
                     f"=== {agent_name.upper()} REPORT ===\n{output[:6000]}")
             gate_task = "\n\n".join(report_parts)
 
-            log.info(f"[{agent.name}] ({agent.skill}) Reviewing cycle {self.cycle}...")
+            self.sprint_logger.info(f"[{agent.name}] ({agent.skill}) Reviewing cycle {self.cycle}...")
             result = self._run_agent_with_retry(agent, gate_task, context)
             verdict = self._parse_verdict(result.output)
             self._record_result(agent, f"gate-cycle-{self.cycle}", result)
@@ -294,10 +321,10 @@ class Sprint:
 
         # Apply verdict
         self.stats[verdict.lower()] = self.stats.get(verdict.lower(), 0) + 1
-        log.info(f"VERDICT: {verdict}")
+        self.sprint_logger.info(f"VERDICT: {verdict}")
 
         if verdict == "REVERT":
-            log.warning("REVERT — changes will not be deployed")
+            self.sprint_logger.warning("REVERT — changes will not be deployed")
             if self.gate_blocking:
                 self.gate_blocked = True
             if branch and self.git_strategy == "snapshot":
@@ -310,7 +337,7 @@ class Sprint:
                 self.git.merge_to_main(branch)
             if not self.no_deploy and self.deploy_cmd and verdict in ("GO", "CAUTION"):
                 if verdict == "CAUTION":
-                    log.warning("CAUTION — deploying but flagging for review")
+                    self.sprint_logger.warning("CAUTION — deploying but flagging for review")
                 self._deploy()
 
         # Summary
@@ -321,7 +348,7 @@ class Sprint:
         })
 
         # Agent timings
-        log.info(f"CYCLE {self.cycle} COMPLETE — verdict={verdict}")
+        self.sprint_logger.info(f"CYCLE {self.cycle} COMPLETE — verdict={verdict}")
         self._write_cycle_event(self.cycle, verdict, {}, self.last_gate_findings)
         return verdict
 
@@ -464,29 +491,46 @@ class Sprint:
         """
         VALID = ("GO", "CAUTION", "REVERT")
 
-        # 1. JSON block — fenced (```json...```) or raw object
+        # 1. JSON block — fenced (```json...```) or raw object, validated via GateVerdict
+        from pydantic import ValidationError as _PydanticValidationError
         for pattern in (
-            r"```json\s*(\{.*?\})\s*```",           # fenced code block
+            r"```json\s*(\{.*?\})\s*```",                 # fenced code block
             r"```\s*(\{[^`]*\"verdict\"[^`]*\})\s*```",  # generic fenced block
-            r'(\{[^{}]*"verdict"\s*:[^{}]*\})',     # raw inline object
+            r'(\{[^{}]*"verdict"\s*:[^{}]*\})',           # raw inline object
         ):
             json_match = re.search(pattern, output, re.DOTALL)
             if json_match:
                 try:
                     data = json.loads(json_match.group(1))
-                    verdict = data.get("verdict", "").upper().strip()
-                    if verdict in VALID:
-                        self.last_gate_findings = data.get("findings", "")
-                        self.last_gate_issues = data.get("issues", [])
-                        self.last_gate_severity = data.get("severity", "none")
-                        self.last_gate_recommended_action = data.get("recommended_action", "")
-                        self.last_verdict_source = "json"
-                        log.info(
-                            f"Verdict: {verdict} | source=json | "
-                            f"severity={self.last_gate_severity} | "
-                            f"issues={len(self.last_gate_issues)}"
-                        )
-                        return verdict
+                    gv = GateVerdict.model_validate(data)
+                    self.last_gate_findings = gv.findings
+                    self.last_gate_issues = gv.issues
+                    self.last_gate_severity = gv.severity
+                    self.last_gate_recommended_action = gv.recommended_action
+                    self.last_gate_confidence = gv.confidence
+                    self.last_verdict_source = "json"
+                    self.sprint_logger.info(
+                        f"Verdict: {gv.verdict} | source=json | "
+                        f"severity={gv.severity} | issues={len(gv.issues)} | "
+                        f"confidence={gv.confidence}"
+                    )
+                    return gv.verdict
+                except _PydanticValidationError as e:
+                    self.sprint_logger.warning(
+                        f"GateVerdict validation failed — falling back to CAUTION. "
+                        f"Errors: {e.error_count()} — {e.errors()[0]['msg'] if e.errors() else ''}"
+                    )
+                    # populate partial fields for debugging
+                    try:
+                        raw = json.loads(json_match.group(1))
+                        self.last_gate_findings = raw.get("findings", output[:500])
+                    except Exception:
+                        self.last_gate_findings = output[:500]
+                    self.last_gate_issues = []
+                    self.last_gate_severity = "unknown"
+                    self.last_gate_recommended_action = ""
+                    self.last_verdict_source = "default"
+                    return "CAUTION"
                 except (json.JSONDecodeError, AttributeError):
                     pass
 

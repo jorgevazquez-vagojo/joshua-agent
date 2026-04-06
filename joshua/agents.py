@@ -7,6 +7,8 @@ Security Auditor, Tech Writer, etc. The sprint orchestrates the flow between ski
 import logging
 from dataclasses import dataclass, field
 
+from joshua.gate_contract import GATE_JSON_SCHEMA
+
 log = logging.getLogger("joshua")
 
 
@@ -59,24 +61,7 @@ class Agent:
                 "",
                 task,  # Contains the output from other agents
                 "",
-                "You MUST end your response with a JSON block in this exact format:",
-                "",
-                "```json",
-                "{",
-                '  "verdict": "GO" | "CAUTION" | "REVERT",',
-                '  "severity": "none" | "low" | "medium" | "high" | "critical",',
-                '  "findings": "One paragraph summary of what was reviewed",',
-                '  "issues": ["specific issue 1", "specific issue 2"],',
-                '  "recommended_action": "What should happen next"',
-                "}",
-                "```",
-                "",
-                "Rules:",
-                "- GO: code quality is acceptable, no blockers",
-                "- CAUTION: issues found but not blocking, continue with care",
-                "- REVERT: critical issues, must roll back",
-                "- severity: overall severity of findings (none if GO with no issues)",
-                "- issues: empty array [] if no issues found",
+                GATE_JSON_SCHEMA,
             ]
         else:
             parts = [
@@ -133,26 +118,7 @@ Rules:
 - Be conservative. When in doubt, CAUTION not GO.
 - Check that fixes don't introduce regressions.
 
-## Output format
-
-You MUST end your response with a JSON block in this exact format:
-
-```json
-{
-  "verdict": "GO" | "CAUTION" | "REVERT",
-  "severity": "none" | "low" | "medium" | "high" | "critical",
-  "findings": "One paragraph summary of what was reviewed",
-  "issues": ["specific issue 1", "specific issue 2"],
-  "recommended_action": "What should happen next"
-}
-```
-
-Rules for JSON fields:
-- verdict GO: code quality is acceptable, no blockers
-- verdict CAUTION: issues found but not blocking, continue with care
-- verdict REVERT: critical issues, must roll back
-- severity: overall severity of findings (none if GO with no issues)
-- issues: empty array [] if no issues found
+""" + GATE_JSON_SCHEMA + """
 {memory}
 {wiki}""",
 
@@ -270,26 +236,7 @@ Rules:
 - Validate existing functionality not broken.
 - Review git diff HEAD~1 and git log -1 before deciding.
 
-## Output format
-
-You MUST end your response with a JSON block in this exact format:
-
-```json
-{
-  "verdict": "GO" | "CAUTION" | "REVERT",
-  "severity": "none" | "low" | "medium" | "high" | "critical",
-  "findings": "One paragraph summary of what was reviewed",
-  "issues": ["specific issue 1", "specific issue 2"],
-  "recommended_action": "What should happen next"
-}
-```
-
-Rules for JSON fields:
-- verdict GO: code quality is acceptable, no blockers
-- verdict CAUTION: issues found but not blocking, continue with care
-- verdict REVERT: critical issues, must roll back
-- severity: overall severity of findings (none if GO with no issues)
-- issues: empty array [] if no issues found
+""" + GATE_JSON_SCHEMA + """
 {memory}
 {wiki}""",
 }
