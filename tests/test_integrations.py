@@ -64,6 +64,38 @@ class TestGitOps:
         git = GitOps(str(tmp_dir))
         assert git.commit_all("empty") is False
 
+    def test_snapshot_restores_uncommitted_changes_on_branch(self, tmp_dir):
+        import subprocess
+        subprocess.run(["git", "init", "-b", "main"], cwd=str(tmp_dir), capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@test.com"],
+            cwd=str(tmp_dir), capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test"],
+            cwd=str(tmp_dir), capture_output=True,
+        )
+        tracked = tmp_dir / "tracked.txt"
+        tracked.write_text("base")
+        subprocess.run(["git", "add", "tracked.txt"], cwd=str(tmp_dir), capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=str(tmp_dir), capture_output=True)
+
+        tracked.write_text("changed")
+        untracked = tmp_dir / "new.txt"
+        untracked.write_text("new")
+
+        git = GitOps(str(tmp_dir))
+        branch = git.snapshot("sprint/test")
+
+        assert branch == "sprint/test"
+        assert git.current_branch() == "sprint/test"
+        assert tracked.read_text() == "changed"
+        assert untracked.read_text() == "new"
+        stash_list = subprocess.run(
+            ["git", "stash", "list"], cwd=str(tmp_dir), capture_output=True, text=True,
+        )
+        assert "joshua snapshot" not in stash_list.stdout
+
 
 class TestNotifiers:
     def test_null_notifier(self):

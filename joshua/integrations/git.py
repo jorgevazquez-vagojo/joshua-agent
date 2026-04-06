@@ -47,16 +47,29 @@ class GitOps:
         try:
             # Stash any uncommitted changes first
             if not self.is_clean():
-                self._run("stash", "--include-untracked")
-                stashed = True
+                result = self._run(
+                    "stash", "push", "--include-untracked", "-m", f"joshua snapshot {branch_name}",
+                    check=False,
+                )
+                if result.returncode != 0:
+                    log.error(f"Failed to stash local changes: {result.stderr}")
+                    return None
+                stashed = "No local changes to save" not in result.stdout
 
             self._run("checkout", "-b", branch_name)
+            if stashed:
+                applied = self._run("stash", "apply", "stash@{0}", check=False)
+                if applied.returncode != 0:
+                    log.error(f"Failed to restore stashed changes on snapshot branch: {applied.stderr}")
+                    return None
+                self._run("stash", "drop", "stash@{0}", check=False)
             log.info(f"Created snapshot branch: {branch_name}")
             return branch_name
         except subprocess.CalledProcessError as e:
             log.error(f"Failed to create snapshot: {e.stderr}")
             if stashed:
-                self._run("stash", "pop", check=False)
+                self._run("stash", "apply", "stash@{0}", check=False)
+                self._run("stash", "drop", "stash@{0}", check=False)
             return None
 
     def detect_main_branch(self) -> str:
