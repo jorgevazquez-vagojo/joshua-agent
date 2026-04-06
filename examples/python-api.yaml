@@ -13,9 +13,8 @@ runner:
   model: claude-sonnet-4-20250514
 
 agents:
-  builder:
-    name: lightman
-    role: builder
+  dev:
+    skill: dev
     tasks:
       - "Review API endpoint design and REST conventions"
       - "Audit database models and migrations"
@@ -25,9 +24,8 @@ agents:
       - "Audit authentication and permission decorators"
       - "Review logging and observability"
       - "Check configuration management and env vars"
-  debugger:
-    name: vulcan
-    role: debugger
+  bug-hunter:
+    skill: bug-hunter
     tasks:
       - "Scan for SQL injection and ORM misuse"
       - "Check for unvalidated user input"
@@ -36,8 +34,7 @@ agents:
       - "Check for race conditions in async code"
       - "Audit CORS policy and security headers"
   qa:
-    name: wopr
-    role: qa
+    skill: qa
 
 sprint:
   cycle_sleep: 300

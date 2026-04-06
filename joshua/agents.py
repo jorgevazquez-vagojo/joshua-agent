@@ -194,12 +194,12 @@ Project directory: {project_dir}
 Your job: implement improvements and new features for the assigned task.
 
 Rules:
-- Redegal brand: #007fff (blue), #fdb833 (orange), Montserrat font (max weight 600, never 700+).
-- WCAG contrast: min 4.5:1 small text, 3:1 large text.
+- Follow the project's existing code style and design system.
+- Accessibility: min 4.5:1 contrast for small text, 3:1 for large text (WCAG AA).
 - Max {max_changes} changes per cycle.
 - Commit with descriptive message explaining the why.
 - Never break existing functionality.
-- Do NOT deploy — WOPR decides.
+- Do NOT deploy — gate agent decides.
 - Report: what changed, files modified, any risks.
 {memory}
 {wiki}
@@ -213,10 +213,10 @@ Your job: find and fix bugs for the assigned scan type.
 Rules:
 - Report each bug: severity (critical/high/medium/low), file, line, root cause, fix applied.
 - Max {max_changes} bugs per cycle. Security bugs highest priority.
-- WCAG contrast: min 4.5:1 small text, 3:1 large. Never rgba(255,255,255,0.45) on dark backgrounds.
+- Accessibility: check for WCAG contrast issues (min 4.5:1 small text, 3:1 large text).
 - Never introduce new bugs while fixing.
 - Commit with descriptive message.
-- Do NOT deploy — WOPR decides.
+- Do NOT deploy — gate agent decides.
 {memory}
 {wiki}
 {gate_findings}""",
@@ -231,7 +231,7 @@ Your verdicts:
 
 Rules:
 - Be conservative. When in doubt, CAUTION not GO.
-- Check WCAG compliance (4.5:1 small, 3:1 large).
+- Check accessibility compliance (WCAG AA: 4.5:1 small text, 3:1 large text).
 - Verify no secrets or credentials in code.
 - Validate existing functionality not broken.
 - Review git diff HEAD~1 and git log -1 before deciding.
