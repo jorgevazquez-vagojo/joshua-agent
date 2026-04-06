@@ -10,6 +10,7 @@ import logging
 import os
 import threading
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, Depends, Header
@@ -20,21 +21,39 @@ from joshua.integrations.brain_callback import setup_brain_integration
 
 log = logging.getLogger("joshua")
 
-app = FastAPI(
-    title="Joshua Sprint Server",
-    description="Autonomous multi-agent sprint orchestration API",
-    version="0.1.0",
-)
-
 # ── Auth ──────────────────────────────────────────────────────────────
 
 INTERNAL_TOKEN = os.environ.get("JOSHUA_INTERNAL_TOKEN", "")
 
 
 def verify_token(x_internal_token: str = Header(default="")):
-    """Validate internal service token if configured."""
-    if INTERNAL_TOKEN and x_internal_token != INTERNAL_TOKEN:
-        raise HTTPException(status_code=401, detail="Invalid token")
+    """Validate internal service token — required, no exceptions."""
+    if not INTERNAL_TOKEN:
+        raise HTTPException(
+            status_code=503,
+            detail="Server not configured: set JOSHUA_INTERNAL_TOKEN env var before starting."
+        )
+    if x_internal_token != INTERNAL_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid or missing X-Internal-Token")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if not INTERNAL_TOKEN:
+        raise RuntimeError(
+            "JOSHUA_INTERNAL_TOKEN is not set. "
+            'Generate one with: python3 -c "import secrets; print(secrets.token_hex(32))" '
+            "and export it before starting the server."
+        )
+    yield
+
+
+app = FastAPI(
+    title="Joshua Sprint Server",
+    description="Autonomous multi-agent sprint orchestration API",
+    version="0.1.0",
+    lifespan=lifespan,
+)
 
 
 # ── Sprint Registry ──────────────────────────────────────────────────

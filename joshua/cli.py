@@ -23,8 +23,8 @@ def main():
 
 @main.command()
 @click.argument("config", type=click.Path(exists=True))
-@click.option("--max-cycles", "-n", default=0, help="Max cycles (0 = infinite)")
-@click.option("--max-hours", "-H", default=0.0, help="Max hours (0 = infinite)")
+@click.option("--max-cycles", "-n", default=5, help="Max cycles (default: 5; 0 = infinite — use with caution)")
+@click.option("--max-hours", "-H", default=2.0, help="Max hours budget (default: 2.0; 0 = no limit)")
 @click.option("--dry-run", is_flag=True, help="Parse config and exit without running")
 def run(config: str, max_cycles: int, max_hours: float, dry_run: bool):
     """Run an autonomous sprint from a YAML config file.
@@ -147,7 +147,7 @@ def evolve(config: str):
 
 
 @main.command()
-@click.option("--host", default="0.0.0.0", help="Bind address")
+@click.option("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1 — loopback only; use 0.0.0.0 to expose on all interfaces)")
 @click.option("--port", "-p", default=8100, help="Port")
 def serve(host: str, port: int):
     """Start the Joshua HTTP server for programmatic sprint management.

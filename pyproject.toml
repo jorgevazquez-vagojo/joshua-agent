@@ -14,7 +14,7 @@ authors = [
 ]
 keywords = ["ai", "agents", "autonomous", "multi-agent", "sprint", "llm", "claude", "codex", "aider", "skills", "quality-gate"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "Intended Audience :: Information Technology",
@@ -40,10 +40,10 @@ dev = ["pytest>=8.0", "ruff>=0.4"]
 joshua = "joshua.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/jorgevazquez/joshua-agent"
-Documentation = "https://github.com/jorgevazquez/joshua-agent#readme"
-Repository = "https://github.com/jorgevazquez/joshua-agent"
-Issues = "https://github.com/jorgevazquez/joshua-agent/issues"
+Homepage = "https://github.com/jorgevazquez-vagojo/joshua-agent"
+Documentation = "https://github.com/jorgevazquez-vagojo/joshua-agent#readme"
+Repository = "https://github.com/jorgevazquez-vagojo/joshua-agent"
+Issues = "https://github.com/jorgevazquez-vagojo/joshua-agent/issues"
 
 [tool.setuptools.packages.find]
 include = ["joshua*"]
