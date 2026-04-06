@@ -6,8 +6,11 @@ Sprints run in background threads; state is persisted in SQLite.
     joshua serve --port 8100
 """
 
+import hmac
+import ipaddress
 import logging
 import os
+import socket
 import threading
 import uuid
 from contextlib import asynccontextmanager
@@ -17,6 +20,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Depends, Header, Query
 from pydantic import BaseModel, ValidationError, field_validator
 
+from joshua import __version__
 from joshua.sprint import Sprint
 from joshua.config_schema import JoshuaConfig
 from joshua.integrations.hub_callback import setup_hub_integration
@@ -40,7 +44,7 @@ def verify_token(x_internal_token: str = Header(default="")):
             status_code=503,
             detail="Server not configured: set JOSHUA_INTERNAL_TOKEN env var before starting."
         )
-    if x_internal_token != INTERNAL_TOKEN:
+    if not hmac.compare_digest(x_internal_token, INTERNAL_TOKEN):
         raise HTTPException(status_code=401, detail="Invalid or missing X-Internal-Token")
 
 
@@ -58,12 +62,25 @@ async def lifespan(app: FastAPI):
     if interrupted:
         log.warning(f"Server restart: marked {interrupted} sprint(s) as 'interrupted'")
     yield
+    # Graceful shutdown: stop all running sprints
+    with _lock:
+        live = [(sid, e) for sid, e in _registry.items() if e.thread.is_alive()]
+    if live:
+        log.info(f"Shutting down: stopping {len(live)} running sprint(s)...")
+        for sid, entry in live:
+            entry.sprint.stop()
+        for sid, entry in live:
+            entry.thread.join(timeout=30)
+            if entry.thread.is_alive():
+                log.warning(f"Sprint {sid} did not stop within 30s")
+            elif _db:
+                _db.complete_sprint(sid, "stopped")
 
 
 app = FastAPI(
     title="Joshua Sprint Server",
     description="Autonomous multi-agent sprint orchestration API",
-    version="0.4.0",
+    version=__version__,
     lifespan=lifespan,
 )
 
@@ -88,6 +105,16 @@ _lock = threading.Lock()
 MAX_CONCURRENT_SPRINTS = int(os.environ.get("JOSHUA_MAX_SPRINTS", "10"))
 
 
+def _cleanup_registry():
+    """Remove finished sprint entries from in-memory registry to prevent leaks."""
+    with _lock:
+        dead = [sid for sid, e in _registry.items() if not e.thread.is_alive()]
+        for sid in dead:
+            del _registry[sid]
+    if dead:
+        log.info(f"Registry cleanup: removed {len(dead)} finished sprint(s)")
+
+
 # ── Models ────────────────────────────────────────────────────────────
 
 class StartSprintRequest(BaseModel):
@@ -106,10 +133,22 @@ class StartSprintRequest(BaseModel):
         if parsed.scheme not in ("http", "https"):
             raise ValueError("callback_url must use http or https")
         host = parsed.hostname or ""
-        # Block internal/loopback addresses (SSRF protection)
-        blocked = ("localhost", "127.", "169.254.", "10.", "192.168.", "::1", "0.0.0.0")
-        if any(host == b or host.startswith(b) for b in blocked):
-            raise ValueError(f"callback_url host not allowed: {host}")
+        if not host:
+            raise ValueError("callback_url must have a hostname")
+
+        # Resolve DNS to actual IP — prevents DNS rebinding attacks
+        try:
+            resolved = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+            ips = {r[4][0] for r in resolved}
+        except socket.gaierror:
+            raise ValueError(f"callback_url hostname cannot be resolved: {host}")
+
+        for ip_str in ips:
+            ip = ipaddress.ip_address(ip_str)
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                raise ValueError(
+                    f"callback_url resolves to non-public address: {ip_str}"
+                )
         return v
 
 
@@ -237,7 +276,7 @@ def health():
     total_db = len(_db.list_sprints()) if _db else total_live
     return {
         "status": "ok",
-        "version": "0.4.0",
+        "version": __version__,
         "sprints_total": total_db,
         "sprints_running": running,
     }
@@ -280,6 +319,9 @@ def start_sprint(req: StartSprintRequest):
             status_code=422,
             detail={"message": f"project.path does not exist: {project_path}"}
         )
+
+    # Cleanup finished entries before counting
+    _cleanup_registry()
 
     # Rate limiting: cap concurrent running sprints
     with _lock:

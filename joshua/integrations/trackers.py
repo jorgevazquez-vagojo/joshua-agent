@@ -184,7 +184,10 @@ class FilesystemTracker(Tracker):
         return str(path)
 
     def add_comment(self, issue_id: str, text: str):
-        path = Path(issue_id)
+        path = Path(issue_id).resolve()
+        if not str(path).startswith(str(self.dir.resolve())):
+            log.warning(f"FilesystemTracker: rejected path outside tracker dir: {issue_id}")
+            return
         if path.exists():
             with open(path, "a") as f:
                 f.write(f"\n---\n{text}\n")

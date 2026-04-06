@@ -13,7 +13,7 @@ import logging
 import os
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -61,7 +61,7 @@ class SprintDB:
                 conn.execute(_SCHEMA)
 
     def _now(self) -> str:
-        return datetime.utcnow().isoformat()
+        return datetime.now(timezone.utc).isoformat()
 
     # ── writes ────────────────────────────────────────────────────
 

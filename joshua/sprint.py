@@ -132,12 +132,16 @@ class Sprint:
         """Run the sprint loop until stopped, max_cycles, or max_hours reached."""
         # Acquire exclusive lock to prevent concurrent sprints on the same .joshua dir
         lock_path = self.state_dir / "sprint.lock"
+        lock_fd = None
         try:
             lock_fd = open(lock_path, "w")
             import fcntl
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except (ImportError, OSError):
             # fcntl unavailable (Windows) or lock already held
+            if lock_fd:
+                lock_fd.close()
+                lock_fd = None
             if lock_path.exists():
                 try:
                     age = time.time() - lock_path.stat().st_mtime
@@ -235,6 +239,13 @@ class Sprint:
             self.notifier.notify_event("stop",
                 f"Ended at cycle {self.cycle}. Stats: {self.stats}",
                 self.project_name)
+            # Release lock
+            if lock_fd:
+                lock_fd.close()
+            try:
+                lock_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def _run_cycle(self) -> str:
         """Execute one full cycle. Returns verdict string."""
