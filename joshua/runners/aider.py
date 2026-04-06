@@ -13,7 +13,7 @@ class AiderRunner(LLMRunner):
     def name(self) -> str:
         return "aider"
 
-    def run(
+    def _run_impl(
         self,
         prompt: str,
         cwd: str,

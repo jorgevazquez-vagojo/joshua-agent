@@ -63,6 +63,7 @@ class Sprint:
         self.recovery_deploy = sprint_conf.get("recovery_deploy", "")
         self.retries = sprint_conf.get("retries", 0)
         self.max_consecutive_errors = sprint_conf.get("max_consecutive_errors", 0)
+        self.max_backoff = sprint_conf.get("max_backoff", 900)
         self._consecutive_health_failures = 0
         self.git_strategy = sprint_conf.get("git_strategy", "none")
         self.agent_stagger = sprint_conf.get("agent_stagger", 0)  # seconds between agents
@@ -96,6 +97,27 @@ class Sprint:
 
     def run(self):
         """Run the sprint loop until stopped, max_cycles, or max_hours reached."""
+        # Acquire exclusive lock to prevent concurrent sprints on the same .joshua dir
+        lock_path = self.state_dir / "sprint.lock"
+        try:
+            lock_fd = open(lock_path, "w")
+            import fcntl
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (ImportError, OSError):
+            # fcntl unavailable (Windows) or lock already held
+            if lock_path.exists():
+                try:
+                    age = time.time() - lock_path.stat().st_mtime
+                    if age < 3600:  # lock younger than 1h → another sprint is running
+                        raise RuntimeError(
+                            f"Another sprint is already running on {self.state_dir}. "
+                            "Stop it first, or delete .joshua/sprint.lock if it's stale."
+                        )
+                except OSError:
+                    pass
+            lock_fd = open(lock_path, "w")
+        lock_path.write_text(str(os.getpid()))
+
         log.info(f"Sprint started for {self.project_name} at {self.project_dir}")
         log.info(f"Runner: {self.runner.name} | Agents: {[a.name for a in self.agents]}")
         log.info(f"Cycle sleep: {self.cycle_sleep}s | Memory: {self.memory_enabled}")
@@ -143,7 +165,7 @@ class Sprint:
                         break
 
                     # Exponential backoff
-                    backoff = min(self.cycle_sleep * (2 ** self.consecutive_errors), 900)
+                    backoff = min(self.cycle_sleep * (2 ** self.consecutive_errors), self.max_backoff)
                     log.info(f"Backing off {backoff}s...")
                     time.sleep(backoff)
                     continue

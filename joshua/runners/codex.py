@@ -13,7 +13,7 @@ class CodexRunner(LLMRunner):
     def name(self) -> str:
         return "codex"
 
-    def run(
+    def _run_impl(
         self,
         prompt: str,
         cwd: str,
