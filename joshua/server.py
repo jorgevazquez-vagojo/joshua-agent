@@ -114,6 +114,7 @@ class SprintStatus(BaseModel):
     error: str | None = None
     last_verdict_severity: str = "none"
     last_gate_issues_count: int = 0
+    last_verdict_source: str = "none"  # "json" | "legacy" | "default" | "none"
 
 
 class StopResponse(BaseModel):
@@ -250,6 +251,7 @@ def start_sprint(req: StartSprintRequest):
         started_at=entry.started_at,
         last_verdict_severity=sprint.last_gate_severity,
         last_gate_issues_count=len(sprint.last_gate_issues),
+        last_verdict_source=sprint.last_verdict_source,
     )
 
 
@@ -270,6 +272,7 @@ def list_sprints():
                 error=entry.error,
                 last_verdict_severity=entry.sprint.last_gate_severity,
                 last_gate_issues_count=len(entry.sprint.last_gate_issues),
+                last_verdict_source=entry.sprint.last_verdict_source,
             ))
     return result
 
@@ -294,6 +297,7 @@ def get_sprint(sprint_id: str):
         error=entry.error,
         last_verdict_severity=entry.sprint.last_gate_severity,
         last_gate_issues_count=len(entry.sprint.last_gate_issues),
+        last_verdict_source=entry.sprint.last_verdict_source,
     )
 
 

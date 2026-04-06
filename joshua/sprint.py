@@ -93,6 +93,7 @@ class Sprint:
         self.last_gate_issues: list = []
         self.last_gate_severity: str = "none"
         self.last_gate_recommended_action: str = ""
+        self.last_verdict_source: str = "none"  # "json" | "legacy" | "default"
         self.consecutive_errors = 0
 
     def stop(self):
@@ -451,43 +452,69 @@ class Sprint:
     def _parse_verdict(self, output: str) -> str:
         """Parse gate agent verdict from output.
 
-        Expects a JSON block like:
-          {"verdict": "GO", "severity": "none", "findings": "...", ...}
+        Primary: JSON block with full structured contract:
+          {"verdict": "GO|CAUTION|REVERT", "severity": "...",
+           "findings": "...", "issues": [...], "recommended_action": "..."}
 
-        Falls back to legacy VERDICT: text parsing for backwards compat,
-        then defaults to CAUTION if nothing found.
+        Fallback 1: legacy ``VERDICT: GO`` line (deprecated, logs warning).
+        Fallback 2: default CAUTION with truncated output for debugging.
+
+        Sets self.last_verdict_source to "json" | "legacy" | "default"
+        so callers and APIs can distinguish how the verdict was obtained.
         """
-        import json as _json
-        # 1. Try to extract JSON block (```json ... ``` or raw JSON object)
-        json_match = re.search(r"```json\s*(\{.*?\})\s*```", output, re.DOTALL)
-        if not json_match:
-            json_match = re.search(r'(\{[^{}]*"verdict"\s*:[^{}]*\})', output, re.DOTALL)
+        VALID = ("GO", "CAUTION", "REVERT")
 
-        if json_match:
-            try:
-                data = _json.loads(json_match.group(1))
-                verdict = data.get("verdict", "").upper().strip()
-                if verdict in ("GO", "CAUTION", "REVERT"):
-                    # Store structured findings for downstream use
-                    self.last_gate_findings = data.get("findings", "")
-                    self.last_gate_issues = data.get("issues", [])
-                    self.last_gate_severity = data.get("severity", "none")
-                    self.last_gate_recommended_action = data.get("recommended_action", "")
-                    log.info(
-                        f"Verdict: {verdict} | severity={data.get('severity', '?')} | "
-                        f"issues={len(data.get('issues', []))}"
-                    )
-                    return verdict
-            except (_json.JSONDecodeError, AttributeError):
-                pass
+        # 1. JSON block — fenced (```json...```) or raw object
+        for pattern in (
+            r"```json\s*(\{.*?\})\s*```",           # fenced code block
+            r"```\s*(\{[^`]*\"verdict\"[^`]*\})\s*```",  # generic fenced block
+            r'(\{[^{}]*"verdict"\s*:[^{}]*\})',     # raw inline object
+        ):
+            json_match = re.search(pattern, output, re.DOTALL)
+            if json_match:
+                try:
+                    data = json.loads(json_match.group(1))
+                    verdict = data.get("verdict", "").upper().strip()
+                    if verdict in VALID:
+                        self.last_gate_findings = data.get("findings", "")
+                        self.last_gate_issues = data.get("issues", [])
+                        self.last_gate_severity = data.get("severity", "none")
+                        self.last_gate_recommended_action = data.get("recommended_action", "")
+                        self.last_verdict_source = "json"
+                        log.info(
+                            f"Verdict: {verdict} | source=json | "
+                            f"severity={self.last_gate_severity} | "
+                            f"issues={len(self.last_gate_issues)}"
+                        )
+                        return verdict
+                except (json.JSONDecodeError, AttributeError):
+                    pass
 
-        # 2. Legacy fallback: VERDICT: line
+        # 2. Legacy VERDICT: line fallback
         match = re.search(r"VERDICT:\s*(GO|CAUTION|REVERT)", output, re.IGNORECASE)
         if match:
-            log.warning("Gate agent used legacy VERDICT: format — update skill prompt to output JSON")
-            return match.group(1).upper()
+            verdict = match.group(1).upper()
+            self.last_gate_severity = "unknown"
+            self.last_gate_findings = output[:500]
+            self.last_gate_issues = []
+            self.last_gate_recommended_action = ""
+            self.last_verdict_source = "legacy"
+            log.warning(
+                f"Verdict: {verdict} | source=legacy — gate agent should output JSON. "
+                "Update the gate skill prompt."
+            )
+            return verdict
 
-        log.warning("Could not parse verdict from gate agent output — defaulting to CAUTION")
+        # 3. Default CAUTION — log truncated output to help debug
+        self.last_gate_severity = "unknown"
+        self.last_gate_findings = output[:500]
+        self.last_gate_issues = []
+        self.last_gate_recommended_action = ""
+        self.last_verdict_source = "default"
+        log.warning(
+            f"Could not parse verdict — defaulting to CAUTION. "
+            f"Gate output (first 200 chars): {output[:200]!r}"
+        )
         return "CAUTION"
 
     def _deploy(self, cmd: str | None = None):
