@@ -2,6 +2,13 @@
 
 **"Shall we play a game?"**
 
+## Demo
+
+https://github.com/jorgevazquez-vagojo/joshua-agent/assets/demo_en.mp4
+
+[🇪🇸 Ver demo en español](assets/demo_es.mp4)
+
+
 *One day, teams will stop babysitting AI. Instead of prompting one agent at a time — copy prompt, paste output, check, repeat — they'll define a team in a YAML file and walk away. A developer, a bug hunter, a QA reviewer. Or a CFO, a risk analyst, a compliance director. The agents work in cycles: execute tasks, review each other, deploy or roll back, extract lessons, sleep, repeat. You come back to a log of what happened and (hopefully) better output than yesterday. This is that framework. — @jorgevazquez, April 2026*
 
 The idea: define a team of AI agents as **skills** in YAML, point them at a folder (code, documents, reports — anything), and let them run autonomously in cycles. Each cycle, work agents execute their tasks. Gate agents review the output and issue a verdict: `GO`, `CAUTION`, or `REVERT`. Bad work gets rolled back. Good work gets deployed. The agents learn from every cycle — lessons accumulate, a wiki builds itself, and future prompts get better automatically. You sleep. They work.
