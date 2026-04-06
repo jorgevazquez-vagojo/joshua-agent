@@ -51,9 +51,10 @@ class CustomRunner(LLMRunner):
 
         # Always write to a named file — never pass prompt as shell arg
         prompt_dir = Path(cwd) / ".joshua" / "temp"
-        prompt_dir.mkdir(parents=True, exist_ok=True)
+        prompt_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         prompt_file = prompt_dir / f"prompt_{int(time.monotonic() * 1000)}.md"
         prompt_file.write_text(full_prompt, encoding="utf-8")
+        prompt_file.chmod(0o600)
 
         try:
             try:

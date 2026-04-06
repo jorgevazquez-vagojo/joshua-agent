@@ -14,9 +14,11 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, Depends, Header
-from pydantic import BaseModel
+from pathlib import Path
+from pydantic import BaseModel, ValidationError
 
 from joshua.sprint import Sprint
+from joshua.config_schema import JoshuaConfig
 from joshua.integrations.hub_callback import setup_hub_integration
 
 log = logging.getLogger("joshua")
@@ -73,6 +75,7 @@ class SprintEntry:
 
 _registry: dict[str, SprintEntry] = {}
 _lock = threading.Lock()
+MAX_CONCURRENT_SPRINTS = int(os.environ.get("JOSHUA_MAX_SPRINTS", "10"))
 
 
 # ── Models ────────────────────────────────────────────────────────────
@@ -81,6 +84,23 @@ class StartSprintRequest(BaseModel):
     """Sprint config in JSON (same schema as YAML config)."""
     config: dict
     callback_url: str | None = None
+    config_version: str = "1"  # reserved for future schema evolution
+
+    @field_validator("callback_url", mode="before")
+    @classmethod
+    def validate_callback_url(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        from urllib.parse import urlparse
+        parsed = urlparse(v)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError("callback_url must use http or https")
+        host = parsed.hostname or ""
+        # Block internal/loopback addresses (SSRF protection)
+        blocked = ("localhost", "127.", "169.254.", "10.", "192.168.", "::1", "0.0.0.0")
+        if any(host == b or host.startswith(b) for b in blocked):
+            raise ValueError(f"callback_url host not allowed: {host}")
+        return v
 
 
 class SprintStatus(BaseModel):
@@ -92,6 +112,8 @@ class SprintStatus(BaseModel):
     running: bool
     started_at: str
     error: str | None = None
+    last_verdict_severity: str = "none"
+    last_gate_issues_count: int = 0
 
 
 class StopResponse(BaseModel):
@@ -130,7 +152,13 @@ def _make_callback(callback_url: str):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "sprints": len(_registry)}
+    running = sum(1 for e in _registry.values() if e.thread.is_alive())
+    return {
+        "status": "ok",
+        "version": "0.1.0",
+        "sprints_total": len(_registry),
+        "sprints_running": running,
+    }
 
 
 @app.post("/sprints", response_model=SprintStatus, dependencies=[Depends(verify_token)])
@@ -138,14 +166,42 @@ def start_sprint(req: StartSprintRequest):
     """Start a new sprint from a JSON config."""
     config = req.config
 
-    # Validate minimal config
-    if "project" not in config or "agents" not in config:
-        raise HTTPException(400, "Config must have 'project' and 'agents' sections")
+    # Validate config version
+    if req.config_version != "1":
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unsupported config_version: {req.config_version}. Supported: ['1']"
+        )
 
-    # Ensure project path exists
-    project_path = config["project"].get("path", "")
-    if project_path:
-        os.makedirs(project_path, exist_ok=True)
+    # Validate config schema
+    try:
+        JoshuaConfig.model_validate(config)
+    except ValidationError as e:
+        errors = []
+        for err in e.errors():
+            loc = " \u2192 ".join(str(x) for x in err["loc"])
+            errors.append({"field": loc, "error": err["msg"]})
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "Config validation failed", "errors": errors}
+        )
+
+    # Validate project path exists on disk
+    project_path = config.get("project", {}).get("path", "")
+    if project_path and not Path(project_path).is_dir():
+        raise HTTPException(
+            status_code=422,
+            detail={"message": f"project.path does not exist: {project_path}"}
+        )
+
+    # Rate limiting: cap concurrent running sprints
+    with _lock:
+        running_count = sum(1 for e in _registry.values() if e.thread.is_alive())
+    if running_count >= MAX_CONCURRENT_SPRINTS:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many concurrent sprints ({running_count}/{MAX_CONCURRENT_SPRINTS}). "                   f"Stop a sprint or raise JOSHUA_MAX_SPRINTS env var."
+        )
 
     sprint_id = str(uuid.uuid4())[:8]
 
@@ -190,6 +246,8 @@ def start_sprint(req: StartSprintRequest):
         gate_blocked=sprint.gate_blocked,
         running=True,
         started_at=entry.started_at,
+        last_verdict_severity=sprint.last_gate_severity,
+        last_gate_issues_count=len(sprint.last_gate_issues),
     )
 
 
@@ -208,6 +266,8 @@ def list_sprints():
                 running=entry.thread.is_alive(),
                 started_at=entry.started_at,
                 error=entry.error,
+                last_verdict_severity=entry.sprint.last_gate_severity,
+                last_gate_issues_count=len(entry.sprint.last_gate_issues),
             ))
     return result
 
@@ -230,6 +290,8 @@ def get_sprint(sprint_id: str):
         running=entry.thread.is_alive(),
         started_at=entry.started_at,
         error=entry.error,
+        last_verdict_severity=entry.sprint.last_gate_severity,
+        last_gate_issues_count=len(entry.sprint.last_gate_issues),
     )
 
 

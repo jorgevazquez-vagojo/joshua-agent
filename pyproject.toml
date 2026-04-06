@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "joshua-agent"
 version = "0.1.0"
-description = "Run AI agent teams in autonomous cycles. Define skills in YAML (Dev, QA, CFO, Legal — anything), gate reviews with GO/CAUTION/REVERT verdicts, auto-deploy or rollback, self-learning wiki. Works with Claude Code, Codex, Aider, or any LLM CLI. Shall we play a game?"
+description = "Autonomous gated software sprints. Define your team in YAML — dev, bug-hunter, QA. Gate agent issues GO/CAUTION/REVERT. Auto-deploy on GO, auto-revert on REVERT. Self-learning wiki across cycles. Works with Claude Code, Aider, Codex, or any LLM CLI. Shall we play a game?"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"

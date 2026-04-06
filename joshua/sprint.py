@@ -25,6 +25,7 @@ from joshua.integrations.git import GitOps
 from joshua.integrations.notifications import notifier_factory
 from joshua.integrations.trackers import tracker_factory
 from joshua.utils.health import check_health
+from joshua.utils.safe_cmd import run_command
 from joshua.utils.preflight import run_preflight, check_memory, wait_for_memory
 
 log = logging.getLogger("joshua")
@@ -89,6 +90,9 @@ class Sprint:
         self.cycle_summaries: list[dict] = []
         self.gate_blocked = False
         self.last_gate_findings = ""
+        self.last_gate_issues: list = []
+        self.last_gate_severity: str = "none"
+        self.last_gate_recommended_action: str = ""
         self.consecutive_errors = 0
 
     def stop(self):
@@ -445,45 +449,60 @@ class Sprint:
         return ctx
 
     def _parse_verdict(self, output: str) -> str:
-        """Extract GO/CAUTION/REVERT from QA output.
+        """Parse gate agent verdict from output.
 
-        Handles varied formatting: plain text, markdown bold (**VERDICT: GO**),
-        indentation, and newlines between label and value.
+        Expects a JSON block like:
+          {"verdict": "GO", "severity": "none", "findings": "...", ...}
+
+        Falls back to legacy VERDICT: text parsing for backwards compat,
+        then defaults to CAUTION if nothing found.
         """
-        import re
-        # Strip markdown formatting and search for verdict anywhere in output
-        clean = re.sub(r"[*_`#>]", "", output)
-        match = re.search(
-            r"VERDICT\s*:\s*(GO|CAUTION|REVERT)",
-            clean,
-            re.IGNORECASE | re.MULTILINE,
-        )
+        import json as _json
+        # 1. Try to extract JSON block (```json ... ``` or raw JSON object)
+        json_match = re.search(r"```json\s*(\{.*?\})\s*```", output, re.DOTALL)
+        if not json_match:
+            json_match = re.search(r'(\{[^{}]*"verdict"\s*:[^{}]*\})', output, re.DOTALL)
+
+        if json_match:
+            try:
+                data = _json.loads(json_match.group(1))
+                verdict = data.get("verdict", "").upper().strip()
+                if verdict in ("GO", "CAUTION", "REVERT"):
+                    # Store structured findings for downstream use
+                    self.last_gate_findings = data.get("findings", "")
+                    self.last_gate_issues = data.get("issues", [])
+                    self.last_gate_severity = data.get("severity", "none")
+                    self.last_gate_recommended_action = data.get("recommended_action", "")
+                    log.info(
+                        f"Verdict: {verdict} | severity={data.get('severity', '?')} | "
+                        f"issues={len(data.get('issues', []))}"
+                    )
+                    return verdict
+            except (_json.JSONDecodeError, AttributeError):
+                pass
+
+        # 2. Legacy fallback: VERDICT: line
+        match = re.search(r"VERDICT:\s*(GO|CAUTION|REVERT)", output, re.IGNORECASE)
         if match:
+            log.warning("Gate agent used legacy VERDICT: format — update skill prompt to output JSON")
             return match.group(1).upper()
-        log.warning("Could not parse verdict from QA output — defaulting to CAUTION")
-        return "CAUTION"  # safe default
+
+        log.warning("Could not parse verdict from gate agent output — defaulting to CAUTION")
+        return "CAUTION"
 
     def _deploy(self, cmd: str | None = None):
-        """Run a deploy command."""
+        """Run a deploy command safely (no shell=True)."""
         deploy_cmd = cmd or self.deploy_cmd
         if not deploy_cmd:
             return
-        log.info(f"Deploying: {deploy_cmd}")
-        try:
-            result = subprocess.run(
-                deploy_cmd,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=300,
-                cwd=self.project_dir,
-            )
-            if result.returncode == 0:
-                log.info("Deploy successful")
-            else:
-                log.error(f"Deploy failed: {result.stderr[:500]}")
-        except Exception as e:
-            log.error(f"Deploy error: {e}")
+        success, output = run_command(
+            deploy_cmd,
+            cwd=self.project_dir,
+            timeout=300,
+            dry_run=self.no_deploy,
+        )
+        if not success and not self.no_deploy:
+            log.error(f"Deploy failed: {output}")
 
     def _send_digest(self):
         """Send periodic digest via notifications and tracker."""

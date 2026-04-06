@@ -51,8 +51,12 @@ class TestAgent:
     def test_build_task_prompt_gate(self):
         agent = Agent(name="qa", skill="qa", verdict_format=True)
         prompt = agent.build_task_prompt("report content here", 5, {})
-        assert "VERDICT" in prompt
-        assert "GO|CAUTION|REVERT" in prompt
+        # JSON contract: prompt must instruct the gate agent to output a JSON block
+        assert "```json" in prompt
+        assert '"verdict"' in prompt
+        assert "GO" in prompt
+        assert "CAUTION" in prompt
+        assert "REVERT" in prompt
         assert "report content here" in prompt
 
 

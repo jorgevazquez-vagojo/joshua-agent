@@ -8,7 +8,9 @@ https://github.com/jorgevazquez-vagojo/joshua-agent/assets/demo_es.mp4
 
 [🇬🇧 Watch demo in English](assets/demo_en.mp4)
 
-*Algún día, los equipos dejarán de hacer de niñera de la IA. En vez de ir prompt a prompt — copiar, pegar, revisar, repetir — definirán un equipo en un archivo YAML y se irán a dormir. Un desarrollador, un cazador de bugs, un revisor QA. O un CFO, un analista de riesgos, un director de cumplimiento. Los agentes trabajan en ciclos: ejecutan tareas, se revisan entre sí, despliegan o revierten, extraen lecciones, duermen, repiten. Vuelves y tienes un log de lo que pasó y (con suerte) un resultado mejor que ayer. Este es ese framework. — @jorgevazquez, abril 2026*
+**Sprints de software autónomos con gate.** Define tu equipo en YAML. Los agentes trabajan en ciclos — dev, bug-hunter, QA. El gate decide:  despliega.  revierte. Vuelves y tienes un log.
+
+*Algún día, los equipos dejarán de hacer de niñera de la IA. En vez de ir prompt a prompt — copiar, pegar, revisar, repetir — definirán un equipo en un archivo YAML y se irán a dormir. Los agentes trabajan en ciclos: ejecutan tareas, se revisan entre sí, despliegan o revierten, extraen lecciones, duermen, repiten. Vuelves y tienes un log de lo que pasó y (con suerte) un resultado mejor que ayer. — @jorgevazquez, abril 2026*
 
 La idea: define un equipo de agentes IA como **skills** en YAML, apúntalos a una carpeta (código, documentos, informes — lo que sea), y déjalos correr de forma autónoma en ciclos. En cada ciclo, los agentes de trabajo ejecutan sus tareas. Los agentes de puerta revisan el resultado y emiten un veredicto: `GO`, `CAUTION` o `REVERT`. El trabajo malo se revierte automáticamente. El bueno se despliega. Los agentes aprenden en cada ciclo — las lecciones se acumulan, una wiki se construye sola, y los prompts futuros mejoran automáticamente. Tú duermes. Ellos trabajan.
 

@@ -1,5 +1,6 @@
 """Pydantic schema for joshua-agent YAML config validation."""
 from __future__ import annotations
+import re
 from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -54,6 +55,15 @@ class SprintConfig(BaseModel):
     deploy_command: str = ""
     revert_command: str = ""
     health_check_command: str = ""
+
+    @field_validator("deploy_command", "revert_command", "health_check_command", mode="before")
+    @classmethod
+    def no_shell_injection(cls, v: str) -> str:
+        if v and re.search(r"[;&|`]|\$\(", v):
+            raise ValueError(
+                "Command contains shell metacharacters. Use a script file instead."
+            )
+        return v
     cycle_delay: int = Field(default=0, ge=0)
 
 

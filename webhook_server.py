@@ -14,6 +14,14 @@ DEPLOY_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "deploy
 
 app = FastAPI(title="Joshua Webhook")
 
+@app.on_event("startup")
+async def _check_config():
+    if not WEBHOOK_SECRET:
+        log.error(
+            "JOSHUA_WEBHOOK_SECRET is not set — all webhook requests will be rejected. "
+            "Set it with: export JOSHUA_WEBHOOK_SECRET=<your-secret>"
+        )
+
 
 def _verify_signature(body: bytes, signature: str) -> bool:
     if not WEBHOOK_SECRET:

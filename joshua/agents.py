@@ -59,11 +59,24 @@ class Agent:
                 "",
                 task,  # Contains the output from other agents
                 "",
-                "Respond with EXACTLY this format:",
-                "VERDICT: GO|CAUTION|REVERT",
-                "REASONING: <one paragraph>",
-                "RISK_AREAS: <comma-separated list>",
-                "ACTION_ITEMS: <any specific follow-ups>",
+                "You MUST end your response with a JSON block in this exact format:",
+                "",
+                "```json",
+                "{",
+                '  "verdict": "GO" | "CAUTION" | "REVERT",',
+                '  "severity": "none" | "low" | "medium" | "high" | "critical",',
+                '  "findings": "One paragraph summary of what was reviewed",',
+                '  "issues": ["specific issue 1", "specific issue 2"],',
+                '  "recommended_action": "What should happen next"',
+                "}",
+                "```",
+                "",
+                "Rules:",
+                "- GO: code quality is acceptable, no blockers",
+                "- CAUTION: issues found but not blocking, continue with care",
+                "- REVERT: critical issues, must roll back",
+                "- severity: overall severity of findings (none if GO with no issues)",
+                "- issues: empty array [] if no issues found",
             ]
         else:
             parts = [
@@ -119,6 +132,27 @@ Your verdicts:
 Rules:
 - Be conservative. When in doubt, CAUTION not GO.
 - Check that fixes don't introduce regressions.
+
+## Output format
+
+You MUST end your response with a JSON block in this exact format:
+
+```json
+{
+  "verdict": "GO" | "CAUTION" | "REVERT",
+  "severity": "none" | "low" | "medium" | "high" | "critical",
+  "findings": "One paragraph summary of what was reviewed",
+  "issues": ["specific issue 1", "specific issue 2"],
+  "recommended_action": "What should happen next"
+}
+```
+
+Rules for JSON fields:
+- verdict GO: code quality is acceptable, no blockers
+- verdict CAUTION: issues found but not blocking, continue with care
+- verdict REVERT: critical issues, must roll back
+- severity: overall severity of findings (none if GO with no issues)
+- issues: empty array [] if no issues found
 {memory}
 {wiki}""",
 
@@ -235,6 +269,27 @@ Rules:
 - Verify no secrets or credentials in code.
 - Validate existing functionality not broken.
 - Review git diff HEAD~1 and git log -1 before deciding.
+
+## Output format
+
+You MUST end your response with a JSON block in this exact format:
+
+```json
+{
+  "verdict": "GO" | "CAUTION" | "REVERT",
+  "severity": "none" | "low" | "medium" | "high" | "critical",
+  "findings": "One paragraph summary of what was reviewed",
+  "issues": ["specific issue 1", "specific issue 2"],
+  "recommended_action": "What should happen next"
+}
+```
+
+Rules for JSON fields:
+- verdict GO: code quality is acceptable, no blockers
+- verdict CAUTION: issues found but not blocking, continue with care
+- verdict REVERT: critical issues, must roll back
+- severity: overall severity of findings (none if GO with no issues)
+- issues: empty array [] if no issues found
 {memory}
 {wiki}""",
 }

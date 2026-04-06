@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import urllib.request
 import base64
 from abc import ABC, abstractmethod
@@ -177,7 +178,7 @@ class FilesystemTracker(Tracker):
     def create_issue(self, summary: str, description: str, **kwargs) -> str | None:
         from datetime import datetime
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-        filename = f"{ts}-{summary[:50].replace(' ', '-').lower()}.md"
+        filename = f"{ts}-{re.sub(r'[^a-z0-9-]+', '-', summary[:50].lower())}.md"
         path = self.dir / filename
         path.write_text(f"# {summary}\n\n{description}\n")
         return str(path)
