@@ -53,7 +53,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Joshua Sprint Server",
     description="Autonomous multi-agent sprint orchestration API",
-    version="0.2.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
@@ -153,7 +153,7 @@ def health():
     running = sum(1 for e in _registry.values() if e.thread.is_alive())
     return {
         "status": "ok",
-        "version": "0.2.0",
+        "version": "0.3.0",
         "sprints_total": len(_registry),
         "sprints_running": running,
     }
