@@ -17,7 +17,7 @@ from fastapi import FastAPI, HTTPException, Depends, Header
 from pydantic import BaseModel
 
 from joshua.sprint import Sprint
-from joshua.integrations.brain_callback import setup_brain_integration
+from joshua.integrations.hub_callback import setup_hub_integration
 
 log = logging.getLogger("joshua")
 
@@ -160,7 +160,7 @@ def start_sprint(req: StartSprintRequest):
     sprint = Sprint(config)
 
     # Brain integration (if configured in the config)
-    setup_brain_integration(sprint, config)
+    setup_hub_integration(sprint, config)
 
     # Generic callback (overrides Brain callback if both set)
     if req.callback_url:

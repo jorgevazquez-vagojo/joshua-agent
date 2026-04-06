@@ -93,34 +93,34 @@ class TestSprintHooks:
         mock_cycle.assert_called_once()
 
 
-class TestBrainCallback:
+class TestHubCallback:
     """Test Brain callback integration."""
 
     def test_setup_disabled(self):
-        from joshua.integrations.brain_callback import setup_brain_integration
+        from joshua.integrations.hub_callback import setup_hub_integration
         sprint = MagicMock()
         sprint.on_cycle_complete = None
         sprint.context_provider = None
-        config = {"integrations": {"brain": {"enabled": False}}}
-        setup_brain_integration(sprint, config)
+        config = {"integrations": {"hub": {"enabled": False}}}
+        setup_hub_integration(sprint, config)
         assert sprint.on_cycle_complete is None
 
     def test_setup_no_integrations(self):
-        from joshua.integrations.brain_callback import setup_brain_integration
+        from joshua.integrations.hub_callback import setup_hub_integration
         sprint = MagicMock()
         sprint.on_cycle_complete = None
         sprint.context_provider = None
-        setup_brain_integration(sprint, {})
+        setup_hub_integration(sprint, {})
         assert sprint.on_cycle_complete is None
 
     def test_setup_enabled(self):
-        from joshua.integrations.brain_callback import setup_brain_integration
+        from joshua.integrations.hub_callback import setup_hub_integration
         sprint = MagicMock()
         sprint.on_cycle_complete = None
         sprint.context_provider = None
         config = {
             "integrations": {
-                "brain": {
+                "hub": {
                     "enabled": True,
                     "api_url": "http://localhost:4000",
                     "group_id": "abc-123",
@@ -129,63 +129,63 @@ class TestBrainCallback:
                 }
             }
         }
-        setup_brain_integration(sprint, config)
+        setup_hub_integration(sprint, config)
         assert sprint.on_cycle_complete is not None
         assert sprint.context_provider is not None
 
     def test_setup_no_group_id_skips(self):
-        from joshua.integrations.brain_callback import setup_brain_integration
+        from joshua.integrations.hub_callback import setup_hub_integration
         sprint = MagicMock()
         sprint.on_cycle_complete = None
         config = {
             "integrations": {
-                "brain": {
+                "hub": {
                     "enabled": True,
                     "api_url": "http://localhost:4000",
                 }
             }
         }
-        setup_brain_integration(sprint, config)
+        setup_hub_integration(sprint, config)
         # Should not set callbacks without group_id
         assert sprint.on_cycle_complete is None
 
-    @patch("joshua.integrations.brain_callback.requests.post")
+    @patch("joshua.integrations.hub_callback.requests.post")
     def test_callback_posts_to_brain(self, mock_post):
-        from joshua.integrations.brain_callback import BrainCallback
+        from joshua.integrations.hub_callback import HubCallback
         mock_post.return_value = MagicMock(status_code=200)
-        cb = BrainCallback("http://localhost:4000", "group-123", "token")
+        cb = HubCallback("http://localhost:4000", "group-123", "token")
         cb.on_cycle_complete({"cycle": 1, "verdict": "GO"})
         mock_post.assert_called_once()
         url = mock_post.call_args[0][0]
         assert "/api/sprints/callback" in url
 
-    @patch("joshua.integrations.brain_callback.requests.post", side_effect=Exception("network"))
+    @patch("joshua.integrations.hub_callback.requests.post", side_effect=Exception("network"))
     def test_callback_handles_error(self, mock_post):
-        from joshua.integrations.brain_callback import BrainCallback
-        cb = BrainCallback("http://localhost:4000", "group-123")
+        from joshua.integrations.hub_callback import HubCallback
+        cb = HubCallback("http://localhost:4000", "group-123")
         # Should not raise
         cb.on_cycle_complete({"cycle": 1, "verdict": "GO"})
 
-    @patch("joshua.integrations.brain_callback.requests.get")
+    @patch("joshua.integrations.hub_callback.requests.get")
     def test_context_provider_fetches(self, mock_get):
-        from joshua.integrations.brain_callback import BrainContextProvider
+        from joshua.integrations.hub_callback import HubContextProvider
         mock_get.return_value = MagicMock(
             status_code=200,
             json=lambda: [{"title": "Test", "content": "Knowledge content"}],
         )
-        provider = BrainContextProvider("http://localhost:4000", "group-123", cache_ttl=0)
+        provider = HubContextProvider("http://localhost:4000", "group-123", cache_ttl=0)
         ctx = provider.get_context(1)
         assert "BRAIN KNOWLEDGE" in ctx
         assert "Test" in ctx
 
-    @patch("joshua.integrations.brain_callback.requests.get")
+    @patch("joshua.integrations.hub_callback.requests.get")
     def test_context_provider_caches(self, mock_get):
-        from joshua.integrations.brain_callback import BrainContextProvider
+        from joshua.integrations.hub_callback import HubContextProvider
         mock_get.return_value = MagicMock(
             status_code=200,
             json=lambda: [{"title": "Cached", "content": "Data"}],
         )
-        provider = BrainContextProvider("http://localhost:4000", "group-123", cache_ttl=300)
+        provider = HubContextProvider("http://localhost:4000", "group-123", cache_ttl=300)
         ctx1 = provider.get_context(1)
         ctx2 = provider.get_context(2)
         # Should only call API once due to cache

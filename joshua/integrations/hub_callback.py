@@ -1,4 +1,4 @@
-"""Brain integration — bidirectional sync between Joshua sprints and Brain.
+"""Hub integration — bidirectional sync between Joshua sprints and Brain.
 
 After each cycle:
   - POSTs cycle results to Brain's callback endpoint
@@ -16,7 +16,7 @@ import requests
 log = logging.getLogger("joshua")
 
 
-class BrainCallback:
+class HubCallback:
     """Sends cycle results and lessons to Brain's API."""
 
     def __init__(self, api_url: str, group_id: str, token: str = ""):
@@ -72,7 +72,7 @@ class BrainCallback:
             log.warning(f"Brain knowledge POST failed: {e}")
 
 
-class BrainContextProvider:
+class HubContextProvider:
     """Fetches knowledge from Brain to inject into agent prompts.
 
     Caches results for `cache_ttl` seconds to avoid hammering Brain on every cycle.
@@ -129,37 +129,37 @@ class BrainContextProvider:
         return self._cache or ""
 
 
-def setup_brain_integration(sprint, config: dict):
+def setup_hub_integration(sprint, config: dict):
     """Wire Brain callback and context provider into a Sprint instance.
 
-    Called by the server when a sprint config includes brain integration settings.
+    Called by the server when a sprint config includes hub integration settings.
 
     Config format:
         integrations:
-          brain:
+          hub:
             enabled: true
             api_url: "http://127.0.0.1:4000"
             api_token: "secret"
             group_id: "uuid"
             department: "engineering"
     """
-    brain_conf = config.get("integrations", {}).get("brain", {})
-    if not brain_conf.get("enabled"):
+    hub_conf = config.get("integrations", {}).get("hub", {})
+    if not hub_conf.get("enabled"):
         return
 
-    api_url = brain_conf.get("api_url", "http://127.0.0.1:4000")
-    group_id = brain_conf.get("group_id", "")
-    token = brain_conf.get("api_token", "")
-    department = brain_conf.get("department", "")
+    api_url = hub_conf.get("api_url", "http://127.0.0.1:4000")
+    group_id = hub_conf.get("group_id", "")
+    token = hub_conf.get("api_token", "")
+    department = hub_conf.get("department", "")
 
     if not group_id:
-        log.warning("Brain integration enabled but no group_id — skipping")
+        log.warning("Hub integration enabled but no group_id — skipping")
         return
 
-    callback = BrainCallback(api_url, group_id, token)
-    provider = BrainContextProvider(api_url, group_id, department, token)
+    callback = HubCallback(api_url, group_id, token)
+    provider = HubContextProvider(api_url, group_id, department, token)
 
     sprint.on_cycle_complete = callback.on_cycle_complete
     sprint.context_provider = provider.get_context
 
-    log.info(f"Brain integration active — group={group_id}, api={api_url}")
+    log.info(f"Hub integration active — group={group_id}, api={api_url}")
