@@ -1,7 +1,7 @@
 """Joshua HTTP server — manages sprints via REST API.
 
-Used by orchestrators to start/stop/monitor sprints programmatically.
-Sprints run in background threads; state is persisted in SQLite.
+Sprints run in isolated worker processes; all state lives in SQLite.
+The server is stateless — reads from DB, delegates to ProcessManager.
 
     joshua serve --port 8100
 """
@@ -11,7 +11,6 @@ import ipaddress
 import logging
 import os
 import socket
-import threading
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -21,21 +20,27 @@ from fastapi import FastAPI, HTTPException, Depends, Header, Query
 from pydantic import BaseModel, ValidationError, field_validator
 
 from joshua import __version__
-from joshua.sprint import Sprint
 from joshua.config_schema import JoshuaConfig
-from joshua.integrations.hub_callback import setup_hub_integration
 from joshua.persistence import SprintDB
+from joshua.process_manager import ProcessManager
+from joshua.supervisor import Supervisor
 
 log = logging.getLogger("joshua")
 
-# ── Auth ──────────────────────────────────────────────────────────────
+# ── Config ─────────────────────────────────────────────────────────────
 
 INTERNAL_TOKEN = os.environ.get("JOSHUA_INTERNAL_TOKEN", "")
 SPRINT_LOG_DIR = Path(os.environ.get("JOSHUA_LOG_DIR", ".joshua/logs"))
+MAX_CONCURRENT_SPRINTS = int(os.environ.get("JOSHUA_MAX_SPRINTS", "10"))
+AUTO_RESTART = os.environ.get("JOSHUA_AUTO_RESTART", "0") == "1"
 
-# Singleton DB — initialized in lifespan
+# Singletons — initialized in lifespan
 _db: SprintDB | None = None
+_pm: ProcessManager | None = None
+_supervisor: Supervisor | None = None
 
+
+# ── Auth ───────────────────────────────────────────────────────────────
 
 def verify_token(x_internal_token: str = Header(default="")):
     """Validate internal service token — required, no exceptions."""
@@ -48,9 +53,11 @@ def verify_token(x_internal_token: str = Header(default="")):
         raise HTTPException(status_code=401, detail="Invalid or missing X-Internal-Token")
 
 
+# ── Lifespan ───────────────────────────────────────────────────────────
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _db
+    global _db, _pm, _supervisor
     if not INTERNAL_TOKEN:
         raise RuntimeError(
             "JOSHUA_INTERNAL_TOKEN is not set. "
@@ -58,23 +65,26 @@ async def lifespan(app: FastAPI):
             "and export it before starting the server."
         )
     _db = SprintDB()
-    interrupted = _db.mark_interrupted_on_startup()
-    if interrupted:
-        log.warning(f"Server restart: marked {interrupted} sprint(s) as 'interrupted'")
+    _pm = ProcessManager(_db, SPRINT_LOG_DIR, MAX_CONCURRENT_SPRINTS)
+    _supervisor = Supervisor(
+        _db, _pm,
+        check_interval=30,
+        heartbeat_timeout=90,
+        auto_restart=AUTO_RESTART,
+    )
+    _supervisor.recover_on_startup()
+    _supervisor.start()
+    log.info("Joshua server started — process-based runtime")
     yield
-    # Graceful shutdown: stop all running sprints
-    with _lock:
-        live = [(sid, e) for sid, e in _registry.items() if e.thread.is_alive()]
-    if live:
-        log.info(f"Shutting down: stopping {len(live)} running sprint(s)...")
-        for sid, entry in live:
-            entry.sprint.stop()
-        for sid, entry in live:
-            entry.thread.join(timeout=30)
-            if entry.thread.is_alive():
-                log.warning(f"Sprint {sid} did not stop within 30s")
-            elif _db:
-                _db.complete_sprint(sid, "stopped")
+    # Graceful shutdown
+    log.info("Shutting down...")
+    _supervisor.stop()
+    _pm.stop_all()
+    _pm.join_all(timeout=30)
+    # Mark any still-running as stopped
+    for row in _db.get_running_sprints():
+        _db.complete_sprint(row["sprint_id"], "stopped")
+    log.info("Shutdown complete")
 
 
 app = FastAPI(
@@ -85,43 +95,13 @@ app = FastAPI(
 )
 
 
-# ── Sprint Registry ──────────────────────────────────────────────────
-
-class SprintEntry:
-    """Tracks a running sprint and its thread."""
-
-    def __init__(self, sprint_id: str, sprint: Sprint, thread: threading.Thread,
-                 config: dict):
-        self.sprint_id = sprint_id
-        self.sprint = sprint
-        self.thread = thread
-        self.config = config
-        self.started_at = datetime.now().isoformat()
-        self.error: str | None = None
-
-
-_registry: dict[str, SprintEntry] = {}
-_lock = threading.Lock()
-MAX_CONCURRENT_SPRINTS = int(os.environ.get("JOSHUA_MAX_SPRINTS", "10"))
-
-
-def _cleanup_registry():
-    """Remove finished sprint entries from in-memory registry to prevent leaks."""
-    with _lock:
-        dead = [sid for sid, e in _registry.items() if not e.thread.is_alive()]
-        for sid in dead:
-            del _registry[sid]
-    if dead:
-        log.info(f"Registry cleanup: removed {len(dead)} finished sprint(s)")
-
-
-# ── Models ────────────────────────────────────────────────────────────
+# ── Models ─────────────────────────────────────────────────────────────
 
 class StartSprintRequest(BaseModel):
     """Sprint config in JSON (same schema as YAML config)."""
     config: dict
     callback_url: str | None = None
-    config_version: str = "1"  # reserved for future schema evolution
+    config_version: str = "1"
 
     @field_validator("callback_url", mode="before")
     @classmethod
@@ -157,15 +137,15 @@ class SprintStatus(BaseModel):
     project: str
     cycle: int
     stats: dict
-    gate_blocked: bool
     running: bool
-    status: str = "running"   # running | completed | failed | interrupted | stopped
+    status: str = "running"
     started_at: str
+    pid: int | None = None
+    worker_state: str = "init"
     error: str | None = None
     last_verdict: str | None = None
     last_verdict_severity: str = "none"
-    last_gate_issues_count: int = 0
-    last_verdict_source: str = "none"  # "json" | "legacy" | "default" | "none"
+    last_verdict_source: str = "none"
 
 
 class StopResponse(BaseModel):
@@ -179,112 +159,49 @@ class SprintLogsResponse(BaseModel):
     total_lines: int
 
 
-# ── Helpers ───────────────────────────────────────────────────────────
+# ── Helpers ────────────────────────────────────────────────────────────
 
-def _db_cycle_callback(sprint_id: str, original_callback=None):
-    """Returns an on_cycle_complete callback that persists state to DB."""
-    def callback(cycle_data: dict):
-        if _db:
-            with _lock:
-                entry = _registry.get(sprint_id)
-            if entry:
-                _db.update_cycle(
-                    sprint_id=sprint_id,
-                    cycle=entry.sprint.cycle,
-                    stats=entry.sprint.stats,
-                    verdict=cycle_data.get("verdict", ""),
-                    severity=entry.sprint.last_gate_severity,
-                    source=entry.sprint.last_verdict_source,
-                )
-        if original_callback:
-            try:
-                original_callback(cycle_data)
-            except Exception as e:
-                log.warning(f"Cycle callback error for {sprint_id}: {e}")
-    return callback
-
-
-def _run_sprint_thread(entry: SprintEntry):
-    """Target function for sprint background thread."""
-    try:
-        entry.sprint.run()
-        if _db:
-            _db.complete_sprint(entry.sprint_id, "completed")
-    except Exception as e:
-        entry.error = str(e)
-        log.error(f"Sprint {entry.sprint_id} crashed: {e}")
-        if _db:
-            _db.complete_sprint(entry.sprint_id, "failed", error=str(e))
-
-
-def _make_callback(callback_url: str):
-    """Create an on_cycle_complete callback that POSTs to a URL."""
-    import requests as req
-
-    def callback(cycle_data: dict):
-        try:
-            req.post(callback_url, json=cycle_data, timeout=10)
-        except Exception as e:
-            log.warning(f"Callback to {callback_url} failed: {e}")
-
-    return callback
-
-
-def _status_from_entry(sid: str, entry: SprintEntry) -> SprintStatus:
+def _status_from_db(row: dict, pm: ProcessManager | None = None) -> SprintStatus:
+    """Build SprintStatus from DB row, enriching with live process state."""
+    sid = row["sprint_id"]
+    is_running = row["status"] == "running"
+    if is_running and pm:
+        is_running = pm.is_alive(sid)
     return SprintStatus(
         sprint_id=sid,
-        project=entry.sprint.project_name,
-        cycle=entry.sprint.cycle,
-        stats=entry.sprint.stats,
-        gate_blocked=entry.sprint.gate_blocked,
-        running=entry.thread.is_alive(),
-        status="running" if entry.thread.is_alive() else "completed",
-        started_at=entry.started_at,
-        error=entry.error,
-        last_verdict=entry.sprint.last_verdict_source if entry.sprint.last_gate_severity != "none" else None,
-        last_verdict_severity=entry.sprint.last_gate_severity,
-        last_gate_issues_count=len(entry.sprint.last_gate_issues),
-        last_verdict_source=entry.sprint.last_verdict_source,
-    )
-
-
-def _status_from_db(row: dict) -> SprintStatus:
-    return SprintStatus(
-        sprint_id=row["sprint_id"],
         project=row["project"],
         cycle=row["cycle"],
         stats=row["stats"],
-        gate_blocked=False,
-        running=False,
+        running=is_running,
         status=row["status"],
         started_at=row["started_at"],
+        pid=row.get("pid"),
+        worker_state=row.get("worker_state", "init"),
         error=row.get("error"),
         last_verdict=row.get("last_verdict"),
         last_verdict_severity=row.get("last_verdict_severity", "none"),
-        last_gate_issues_count=0,
         last_verdict_source=row.get("last_verdict_source", "none"),
     )
 
 
-# ── Routes ────────────────────────────────────────────────────────────
+# ── Routes ─────────────────────────────────────────────────────────────
 
 @app.get("/health")
 def health():
-    with _lock:
-        running = sum(1 for e in _registry.values() if e.thread.is_alive())
-        total_live = len(_registry)
-    total_db = len(_db.list_sprints()) if _db else total_live
+    running = _db.running_count() if _db else 0
+    total = len(_db.list_sprints()) if _db else 0
     return {
         "status": "ok",
         "version": __version__,
-        "sprints_total": total_db,
+        "runtime": "process",
+        "sprints_total": total,
         "sprints_running": running,
     }
 
 
 @app.post("/sprints", response_model=SprintStatus, dependencies=[Depends(verify_token)])
 def start_sprint(req: StartSprintRequest):
-    """Start a new sprint from a JSON config."""
+    """Start a new sprint in an isolated worker process."""
     config = req.config
 
     # Validate config version
@@ -307,7 +224,7 @@ def start_sprint(req: StartSprintRequest):
             detail={"message": "Config validation failed", "errors": errors}
         )
 
-    # Validate project path — required, must exist on disk
+    # Validate project path
     project_path = config.get("project", {}).get("path", "")
     if not project_path:
         raise HTTPException(
@@ -320,12 +237,8 @@ def start_sprint(req: StartSprintRequest):
             detail={"message": f"project.path does not exist: {project_path}"}
         )
 
-    # Cleanup finished entries before counting
-    _cleanup_registry()
-
-    # Rate limiting: cap concurrent running sprints
-    with _lock:
-        running_count = sum(1 for e in _registry.values() if e.thread.is_alive())
+    # Rate limiting
+    running_count = _pm.running_count() if _pm else 0
     if running_count >= MAX_CONCURRENT_SPRINTS:
         raise HTTPException(
             status_code=429,
@@ -334,90 +247,52 @@ def start_sprint(req: StartSprintRequest):
         )
 
     sprint_id = str(uuid.uuid4())[:8]
-    sprint = Sprint(config)
+    project_name = config.get("project", {}).get("name", "unknown")
+    started_at = datetime.now().isoformat()
 
-    # Per-sprint log file
-    sprint.setup_sprint_logger(sprint_id, SPRINT_LOG_DIR)
+    # Persist to DB first
+    _db.insert_sprint(sprint_id, project_name, config, started_at)
 
-    # Hub integration (if configured)
-    setup_hub_integration(sprint, config)
+    # Spawn isolated worker process
+    pid = _pm.spawn(sprint_id, config, callback_url=req.callback_url)
+    _db.update_pid(sprint_id, pid)
 
-    # Compose cycle callback: DB persistence + optional external URL
-    external_cb = _make_callback(req.callback_url) if req.callback_url else None
-    sprint.on_cycle_complete = _db_cycle_callback(sprint_id, external_cb)
+    log.info(f"Sprint {sprint_id} started for {project_name} (pid={pid})")
 
-    # Create entry first, then thread (no _args hack)
-    entry = SprintEntry(sprint_id, sprint, None, config)
-    thread = threading.Thread(
-        target=_run_sprint_thread,
-        args=(entry,),
-        daemon=True,
-        name=f"sprint-{sprint_id}",
-    )
-    entry.thread = thread
-
-    # Persist before starting thread
-    if _db:
-        _db.insert_sprint(sprint_id, sprint.project_name, config, entry.started_at)
-
-    with _lock:
-        _registry[sprint_id] = entry
-
-    thread.start()
-    log.info(f"Sprint {sprint_id} started for {sprint.project_name}")
-
-    return _status_from_entry(sprint_id, entry)
+    row = _db.get_sprint(sprint_id)
+    return _status_from_db(row, _pm)
 
 
 @app.get("/sprints", dependencies=[Depends(verify_token)])
 def list_sprints():
-    """List all sprints — live from registry + historical from DB."""
-    result = []
-    with _lock:
-        live_ids = set(_registry.keys())
-        for sid, entry in _registry.items():
-            result.append(_status_from_entry(sid, entry))
-
-    # Append finished sprints from DB not in live registry
-    if _db:
-        for row in _db.list_sprints():
-            if row["sprint_id"] not in live_ids:
-                result.append(_status_from_db(row))
-
-    return result
+    """List all sprints — all from DB (single source of truth)."""
+    return [_status_from_db(row, _pm) for row in _db.list_sprints()]
 
 
 @app.get("/sprints/{sprint_id}", response_model=SprintStatus,
          dependencies=[Depends(verify_token)])
 def get_sprint(sprint_id: str):
-    """Get status of a specific sprint (live or historical)."""
-    with _lock:
-        entry = _registry.get(sprint_id)
-    if entry:
-        return _status_from_entry(sprint_id, entry)
-
-    # Fall back to DB for finished sprints
-    if _db:
-        row = _db.get_sprint(sprint_id)
-        if row:
-            return _status_from_db(row)
-
-    raise HTTPException(404, f"Sprint {sprint_id} not found")
+    """Get status of a specific sprint."""
+    row = _db.get_sprint(sprint_id)
+    if not row:
+        raise HTTPException(404, f"Sprint {sprint_id} not found")
+    return _status_from_db(row, _pm)
 
 
 @app.post("/sprints/{sprint_id}/stop", response_model=StopResponse,
           dependencies=[Depends(verify_token)])
 def stop_sprint(sprint_id: str):
-    """Request graceful stop of a sprint."""
-    with _lock:
-        entry = _registry.get(sprint_id)
-    if not entry:
+    """Request graceful stop of a sprint via SIGTERM."""
+    row = _db.get_sprint(sprint_id)
+    if not row:
         raise HTTPException(404, f"Sprint {sprint_id} not found")
+    if row["status"] != "running":
+        raise HTTPException(409, f"Sprint {sprint_id} is not running (status={row['status']})")
 
-    entry.sprint.stop()
-    if _db:
-        _db.complete_sprint(sprint_id, "stopped")
-    return StopResponse(sprint_id=sprint_id, stopped=True)
+    stopped = _pm.stop(sprint_id)
+    if stopped:
+        _db.update_worker_state(sprint_id, "stopping")
+    return StopResponse(sprint_id=sprint_id, stopped=stopped)
 
 
 @app.get("/sprints/{sprint_id}/logs", response_model=SprintLogsResponse,

@@ -1,4 +1,4 @@
-"""Dedicated HTTP endpoint tests for Joshua server using FastAPI TestClient."""
+"""HTTP endpoint tests for Joshua server — process-based runtime."""
 
 import os
 import pytest
@@ -41,6 +41,7 @@ class TestHealth:
         data = r.json()
         assert data["status"] == "ok"
         assert "version" in data
+        assert data["runtime"] == "process"
         assert "sprints_total" in data
         assert "sprints_running" in data
 
@@ -77,12 +78,8 @@ class TestAuth:
 # ── POST /sprints ────────────────────────────────────────────────────
 
 class TestStartSprint:
-    @patch("joshua.server.threading.Thread")
-    def test_start_sprint_success(self, mock_thread, client, auth_headers, minimal_config):
-        mock_t = MagicMock()
-        mock_t.is_alive.return_value = True
-        mock_thread.return_value = mock_t
-
+    @patch("joshua.process_manager.ProcessManager.spawn", return_value=12345)
+    def test_start_sprint_success(self, mock_spawn, client, auth_headers, minimal_config):
         r = client.post(
             "/sprints",
             json={"config": minimal_config},
@@ -92,7 +89,8 @@ class TestStartSprint:
         data = r.json()
         assert "sprint_id" in data
         assert data["project"] == "test-project"
-        assert data["running"] is True
+        assert data["pid"] == 12345
+        mock_spawn.assert_called_once()
 
     def test_invalid_config_version_returns_422(self, client, auth_headers, minimal_config):
         r = client.post(
@@ -141,15 +139,10 @@ class TestStartSprint:
         )
         assert r.status_code == 422
 
-    @patch("joshua.server.threading.Thread")
+    @patch("joshua.process_manager.ProcessManager.spawn", return_value=12345)
     @patch("joshua.server.socket.getaddrinfo")
-    def test_callback_url_public_accepted(self, mock_dns, mock_thread, client, auth_headers, minimal_config):
-        # Mock DNS to return a public IP
+    def test_callback_url_public_accepted(self, mock_dns, mock_spawn, client, auth_headers, minimal_config):
         mock_dns.return_value = [(2, 1, 6, "", ("93.184.216.34", 443))]
-        mock_t = MagicMock()
-        mock_t.is_alive.return_value = True
-        mock_thread.return_value = mock_t
-
         r = client.post(
             "/sprints",
             json={"config": minimal_config, "callback_url": "https://webhook.example.com/hook"},
@@ -181,7 +174,7 @@ class TestStartSprint:
 # ── GET /sprints ──────────────────────────────────────────────────────
 
 class TestListSprints:
-    def test_list_sprints_empty(self, client, auth_headers):
+    def test_list_sprints_returns_list(self, client, auth_headers):
         r = client.get("/sprints", headers=auth_headers)
         assert r.status_code == 200
         assert isinstance(r.json(), list)
@@ -194,12 +187,8 @@ class TestGetSprint:
         r = client.get("/sprints/nonexistent-id", headers=auth_headers)
         assert r.status_code == 404
 
-    @patch("joshua.server.threading.Thread")
-    def test_get_sprint_after_start(self, mock_thread, client, auth_headers, minimal_config):
-        mock_t = MagicMock()
-        mock_t.is_alive.return_value = True
-        mock_thread.return_value = mock_t
-
+    @patch("joshua.process_manager.ProcessManager.spawn", return_value=12345)
+    def test_get_sprint_after_start(self, mock_spawn, client, auth_headers, minimal_config):
         start_r = client.post(
             "/sprints",
             json={"config": minimal_config},
@@ -213,19 +202,16 @@ class TestGetSprint:
         assert r.json()["sprint_id"] == sprint_id
 
 
-# ── POST /sprints/{id}/stop ───────────────────────────────────────────
+# ── POST /sprints/{id}/stop ──────────────────────────────────────────
 
 class TestStopSprint:
     def test_stop_nonexistent_sprint_404(self, client, auth_headers):
         r = client.post("/sprints/nonexistent-id/stop", headers=auth_headers)
         assert r.status_code == 404
 
-    @patch("joshua.server.threading.Thread")
-    def test_stop_running_sprint(self, mock_thread, client, auth_headers, minimal_config):
-        mock_t = MagicMock()
-        mock_t.is_alive.return_value = True
-        mock_thread.return_value = mock_t
-
+    @patch("joshua.process_manager.ProcessManager.stop", return_value=True)
+    @patch("joshua.process_manager.ProcessManager.spawn", return_value=12345)
+    def test_stop_running_sprint(self, mock_spawn, mock_stop, client, auth_headers, minimal_config):
         start_r = client.post(
             "/sprints",
             json={"config": minimal_config},
