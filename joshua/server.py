@@ -15,7 +15,7 @@ from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, Depends, Header
 from pathlib import Path
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, field_validator
 
 from joshua.sprint import Sprint
 from joshua.config_schema import JoshuaConfig
