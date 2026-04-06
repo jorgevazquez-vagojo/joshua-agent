@@ -6,6 +6,10 @@ from pathlib import Path
 
 import yaml
 
+from pydantic import ValidationError
+
+from joshua.config_schema import JoshuaConfig
+
 
 _ENV_PATTERN = re.compile(r"\$\{(\w+)(?::([^}]*))?\}")
 
@@ -59,6 +63,17 @@ def load_config(path: str | Path) -> dict:
         config["tracker"]["dir"] = str(Path(config["tracker"]["dir"]).expanduser())
 
     _validate(config)
+
+    # Validate with Pydantic schema
+    try:
+        JoshuaConfig.model_validate(config)
+    except ValidationError as e:
+        errors = []
+        for err in e.errors():
+            loc = " -> ".join(str(x) for x in err["loc"])
+            errors.append(f"  {loc}: {err['msg']}")
+        raise ValueError("Config validation failed:\n" + "\n".join(errors)) from None
+
     return config
 
 

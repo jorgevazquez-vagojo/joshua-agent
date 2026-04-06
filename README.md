@@ -37,6 +37,44 @@ joshua-agent has three core concepts:
 
 The runner abstraction means joshua-agent doesn't care what LLM you use. Claude Code, OpenAI Codex, Aider, or any CLI tool. Swap it in the YAML and everything else stays the same.
 
+
+## Metrics & Evaluation
+
+Each sprint cycle, joshua tracks:
+
+- **Cycle number** — sequential counter since the sprint started
+- **Agent durations** — wall-clock seconds each agent took to run
+- **Gate verdict** — `GO`, `CAUTION`, or `REVERT` for the cycle
+- **Consecutive errors** — how many cycles in a row ended in failure or error
+- **Gate findings** — the raw text the gate agent returned, injected into the next cycle
+
+Results are stored in the `.joshua/` directory alongside your project:
+
+```
+.joshua/
+├── checkpoint.json     Current cycle number, last verdict, error counts
+├── lessons/            One file per cycle — raw lessons extracted from agent output
+└── wiki/               Curated knowledge entries built from accumulated lessons
+```
+
+To measure progress across cycles, use the status command:
+
+```bash
+joshua status .joshua
+```
+
+This shows cycle history, verdict distribution, and per-agent timing. Compare cycle 1 vs cycle N to see whether the gate is issuing fewer REVERTs and agents are completing tasks faster.
+
+To evolve agent prompts using accumulated lessons:
+
+```bash
+joshua evolve config.yaml
+```
+
+`joshua evolve` curates raw lessons into wiki entries and can rewrite agent prompts to incorporate what was learned.
+
+**Honest note:** There is no public benchmark dataset for joshua-agent. What you can track concretely on your own project: GO/REVERT ratio over time, cycle-over-cycle agent duration, and gate finding patterns. Use `joshua status` to build your own baseline.
+
 ## Quick start
 
 ```bash
@@ -233,6 +271,9 @@ joshua status .joshua               # Status dashboard
 joshua evolve config.yaml           # Run evolution + wiki maintenance
 ```
 
+
+> **Deploy safety**: The `deploy_command` in your config runs as a shell command with your user's permissions. Use dry-run mode (`joshua run config.yaml --dry-run`) to validate config before running. Never use untrusted YAML configs.
+
 ## Examples
 
 See [`examples/`](examples/) for ready-to-use configs:
@@ -247,6 +288,25 @@ See [`examples/`](examples/) for ready-to-use configs:
 - [`wordpress.yaml`](examples/wordpress.yaml) — WordPress: WCAG, SEO, PHP audits
 - [`nextjs.yaml`](examples/nextjs.yaml) — Next.js: TypeScript, React, API audits
 - [`python-api.yaml`](examples/python-api.yaml) — FastAPI/Django: testing, security, DB audits
+
+## Use Cases
+
+Three ready-to-run packs for common scenarios:
+
+### Pack 1: Legacy Modernization
+
+Agents: `dev` (modernize code), `bug-hunter` (find regressions), `qa` (gate review).
+Each cycle improves one area of a legacy codebase. The gate blocks the next cycle if tests break or regressions appear, so changes accumulate safely. Example: [`examples/python-api.yaml`](examples/python-api.yaml).
+
+### Pack 2: Continuous Release Gate
+
+Agents: `dev` (implement feature or fix), `qa` (quality gate with GO/CAUTION/REVERT).
+Runs your CI-equivalent autonomously — auto-deploys on GO, reverts on REVERT, sleeps and repeats. Drop-in replacement for a human code reviewer on low-risk branches. Example: [`examples/minimal.yaml`](examples/minimal.yaml).
+
+### Pack 3: Document & Compliance Review
+
+Agents: `analyst` (review documents), `legal` (compliance check), `executive` (summary + gate).
+Multi-agent review cycle for contracts, policies, or technical specs. No deploy command needed — the gate verdict determines whether the document passes or requires revision. Example: [`examples/legal-review.yaml`](examples/legal-review.yaml).
 
 ## Architecture
 

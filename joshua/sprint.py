@@ -64,6 +64,7 @@ class Sprint:
         self.retries = sprint_conf.get("retries", 0)
         self.max_consecutive_errors = sprint_conf.get("max_consecutive_errors", 0)
         self.max_backoff = sprint_conf.get("max_backoff", 900)
+        self.no_deploy = sprint_conf.get("no_deploy", False)
         self._consecutive_health_failures = 0
         self.git_strategy = sprint_conf.get("git_strategy", "none")
         self.agent_stagger = sprint_conf.get("agent_stagger", 0)  # seconds between agents
@@ -302,7 +303,7 @@ class Sprint:
             self.gate_blocked = False
             if branch and self.git_strategy == "snapshot" and self.git.is_repo():
                 self.git.merge_to_main(branch)
-            if self.deploy_cmd and verdict in ("GO", "CAUTION"):
+            if not self.no_deploy and self.deploy_cmd and verdict in ("GO", "CAUTION"):
                 if verdict == "CAUTION":
                     log.warning("CAUTION — deploying but flagging for review")
                 self._deploy()
@@ -314,8 +315,33 @@ class Sprint:
             "timestamp": datetime.now().isoformat(),
         })
 
+        # Agent timings
         log.info(f"CYCLE {self.cycle} COMPLETE — verdict={verdict}")
+        self._write_cycle_event(self.cycle, verdict, {}, self.last_gate_findings)
         return verdict
+
+
+    def _write_cycle_event(self, cycle: int, verdict: str, agent_timings: dict, gate_findings: str):
+        """Write structured JSON event for this cycle to .joshua/events/."""
+        import json as _json
+        events_dir = self.state_dir / "events"
+        events_dir.mkdir(exist_ok=True)
+        event = {
+            "cycle": cycle,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "verdict": verdict,
+            "agent_timings": agent_timings,
+            "gate_findings_chars": len(gate_findings),
+            "stats": {
+                "total_cycles": self.stats.get("go", 0) + self.stats.get("caution", 0) + self.stats.get("revert", 0) + self.stats.get("errors", 0),
+                "go_count": self.stats.get("go", 0),
+                "caution_count": self.stats.get("caution", 0),
+                "revert_count": self.stats.get("revert", 0),
+                "error_count": self.stats.get("errors", 0),
+            }
+        }
+        event_file = events_dir / f"cycle_{cycle:04d}.json"
+        event_file.write_text(_json.dumps(event, indent=2))
 
     def _stagger_wait(self, next_agent: str):
         """Wait between agent runs: memory check + fixed delay."""

@@ -26,7 +26,8 @@ def main():
 @click.option("--max-cycles", "-n", default=5, help="Max cycles (default: 5; 0 = infinite — use with caution)")
 @click.option("--max-hours", "-H", default=2.0, help="Max hours budget (default: 2.0; 0 = no limit)")
 @click.option("--dry-run", is_flag=True, help="Parse config and exit without running")
-def run(config: str, max_cycles: int, max_hours: float, dry_run: bool):
+@click.option("--no-deploy", is_flag=True, help="Skip deploy_command even on GO verdict")
+def run(config: str, max_cycles: int, max_hours: float, dry_run: bool, no_deploy: bool):
     """Run an autonomous sprint from a YAML config file.
 
     Example: joshua run my-project.yaml
@@ -40,6 +41,8 @@ def run(config: str, max_cycles: int, max_hours: float, dry_run: bool):
         cfg.setdefault("sprint", {})["max_cycles"] = max_cycles
     if max_hours:
         cfg.setdefault("sprint", {})["max_hours"] = max_hours
+    if no_deploy:
+        cfg.setdefault("sprint", {})["no_deploy"] = True
 
     if dry_run:
         click.echo(f"Config loaded OK: {cfg['project']['name']}")

@@ -36,6 +36,44 @@ joshua-agent tiene tres conceptos fundamentales:
 
 La abstracción del runner significa que a joshua-agent le da igual qué LLM uses. Claude Code, OpenAI Codex, Aider, o cualquier herramienta CLI. Cámbialo en el YAML y todo lo demás sigue igual.
 
+
+## Métricas & Evaluación
+
+En cada ciclo de sprint, joshua registra:
+
+- **Número de ciclo** — contador secuencial desde que arrancó el sprint
+- **Duración de agentes** — segundos reales que tardó cada agente en ejecutarse
+- **Veredicto de puerta** — `GO`, `CAUTION` o `REVERT` para el ciclo
+- **Errores consecutivos** — cuántos ciclos seguidos han acabado en fallo o error
+- **Hallazgos de puerta** — el texto que devolvió el agente de puerta, inyectado en el siguiente ciclo
+
+Los resultados se almacenan en el directorio `.joshua/` junto a tu proyecto:
+
+```
+.joshua/
+├── checkpoint.json     Ciclo actual, último veredicto, contadores de error
+├── lessons/            Un archivo por ciclo — lecciones extraídas del output del agente
+└── wiki/               Entradas de conocimiento curadas a partir de las lecciones acumuladas
+```
+
+Para medir el progreso a lo largo de ciclos, usa el comando de estado:
+
+```bash
+joshua status .joshua
+```
+
+Muestra el historial de ciclos, distribución de veredictos y tiempos por agente. Compara ciclo 1 vs ciclo N para ver si la puerta emite menos REVERTs y los agentes completan tareas más rápido.
+
+Para evolucionar los prompts de los agentes usando las lecciones acumuladas:
+
+```bash
+joshua evolve config.yaml
+```
+
+`joshua evolve` cura las lecciones en entradas de wiki y puede reescribir los prompts de los agentes para incorporar lo aprendido.
+
+**Nota honesta:** No existe un dataset de benchmark público para joshua-agent. Lo que sí puedes medir en tu propio proyecto: ratio GO/REVERT a lo largo del tiempo, duración de agentes ciclo a ciclo, y patrones en los hallazgos de la puerta. Usa `joshua status` para construir tu propia línea base.
+
 ## Inicio rápido
 
 ```bash
@@ -232,6 +270,9 @@ joshua status .joshua               # Panel de estado
 joshua evolve config.yaml           # Ejecutar evolución + mantenimiento de wiki
 ```
 
+
+> **Seguridad en deploy**: El `deploy_command` de tu config se ejecuta como un comando de shell con los permisos de tu usuario. Usa el modo dry-run (`joshua run config.yaml --dry-run`) para validar la config antes de ejecutar. Nunca uses configs YAML de fuentes no confiables.
+
 ## Ejemplos
 
 Ver [`examples/`](examples/) para configs listas para usar:
@@ -246,6 +287,25 @@ Ver [`examples/`](examples/) para configs listas para usar:
 - [`wordpress.yaml`](examples/wordpress.yaml) — WordPress: WCAG, SEO, auditorías PHP
 - [`nextjs.yaml`](examples/nextjs.yaml) — Next.js: TypeScript, React, auditorías API
 - [`python-api.yaml`](examples/python-api.yaml) — FastAPI/Django: testing, seguridad, auditorías DB
+
+## Casos de uso
+
+Tres packs listos para ejecutar en escenarios habituales:
+
+### Pack 1: Modernización de código legacy
+
+Agentes: `dev` (modernizar código), `bug-hunter` (detectar regresiones), `qa` (revisión de puerta).
+Cada ciclo mejora un área del código legacy. La puerta bloquea el siguiente ciclo si los tests fallan o aparecen regresiones, de modo que los cambios se acumulan de forma segura. Ejemplo: [`examples/python-api.yaml`](examples/python-api.yaml).
+
+### Pack 2: Puerta de release continua
+
+Agentes: `dev` (implementar feature o fix), `qa` (puerta de calidad con GO/CAUTION/REVERT).
+Ejecuta el equivalente a tu CI de forma autónoma — despliega automáticamente en GO, revierte en REVERT, duerme y repite. Sustituto directo de un revisor humano en ramas de bajo riesgo. Ejemplo: [`examples/minimal.yaml`](examples/minimal.yaml).
+
+### Pack 3: Revisión documental y de cumplimiento
+
+Agentes: `analyst` (revisar documentos), `legal` (verificación de cumplimiento), `executive` (resumen + puerta).
+Ciclo de revisión multi-agente para contratos, políticas o especificaciones técnicas. Sin comando de deploy — el veredicto de la puerta determina si el documento pasa o requiere revisión. Ejemplo: [`examples/legal-review.yaml`](examples/legal-review.yaml).
 
 ## Arquitectura
 
