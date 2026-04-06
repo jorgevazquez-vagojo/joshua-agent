@@ -142,7 +142,10 @@ class TestStartSprint:
         assert r.status_code == 422
 
     @patch("joshua.server.threading.Thread")
-    def test_callback_url_public_accepted(self, mock_thread, client, auth_headers, minimal_config):
+    @patch("joshua.server.socket.getaddrinfo")
+    def test_callback_url_public_accepted(self, mock_dns, mock_thread, client, auth_headers, minimal_config):
+        # Mock DNS to return a public IP
+        mock_dns.return_value = [(2, 1, 6, "", ("93.184.216.34", 443))]
         mock_t = MagicMock()
         mock_t.is_alive.return_value = True
         mock_thread.return_value = mock_t
@@ -153,6 +156,26 @@ class TestStartSprint:
             headers=auth_headers,
         )
         assert r.status_code == 200
+
+    def test_ssrf_172_16_blocked(self, client, auth_headers, minimal_config):
+        """172.16.0.0/12 (RFC 1918) must be blocked."""
+        with patch("joshua.server.socket.getaddrinfo", return_value=[(2, 1, 6, "", ("172.16.0.1", 80))]):
+            r = client.post(
+                "/sprints",
+                json={"config": minimal_config, "callback_url": "http://evil.com/hook"},
+                headers=auth_headers,
+            )
+            assert r.status_code == 422
+
+    def test_ssrf_dns_rebinding_blocked(self, client, auth_headers, minimal_config):
+        """DNS resolving to loopback must be blocked."""
+        with patch("joshua.server.socket.getaddrinfo", return_value=[(2, 1, 6, "", ("127.0.0.1", 80))]):
+            r = client.post(
+                "/sprints",
+                json={"config": minimal_config, "callback_url": "http://public-looking.com/hook"},
+                headers=auth_headers,
+            )
+            assert r.status_code == 422
 
 
 # ── GET /sprints ──────────────────────────────────────────────────────
