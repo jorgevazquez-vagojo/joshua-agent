@@ -1,6 +1,13 @@
 # joshua-agent
 
-**"Shall we play a game?"**
+**Sprints de software autónomos con gate.**
+
+| Señal | Estado |
+| --- | --- |
+| Paquete | `0.6.0` |
+| Repo | `27 commits` en `main` |
+| Tests | `262 tests de pytest`; CI en Python `3.11`, `3.12`, `3.13` |
+| Release path | GitHub Actions CI + workflow de publicación a PyPI |
 
 ## Demo
 
@@ -8,7 +15,7 @@ https://github.com/jorgevazquez-vagojo/joshua-agent/assets/demo_es.mp4
 
 [🇬🇧 Watch demo in English](assets/demo_en.mp4)
 
-**Sprints de software autónomos con gate.** Define tu equipo en YAML. Los agentes trabajan en ciclos — dev, bug-hunter, QA. El gate decide:  despliega.  revierte. Vuelves y tienes un log.
+Define tu equipo en YAML. Los agentes trabajan en ciclos — dev, bug-hunter, QA. El gate decide:  despliega.  revierte. Vuelves y tienes un log.
 
 *Algún día, los equipos dejarán de hacer de niñera de la IA. En vez de ir prompt a prompt — copiar, pegar, revisar, repetir — definirán un equipo en un archivo YAML y se irán a dormir. Los agentes trabajan en ciclos: ejecutan tareas, se revisan entre sí, despliegan o revierten, extraen lecciones, duermen, repiten. Vuelves y tienes un log de lo que pasó y (con suerte) un resultado mejor que ayer. — @jorgevazquez, abril 2026*
 
@@ -27,6 +34,23 @@ Nombrado como la IA de WarGames que aprendió que la única jugada ganadora es s
        ^                       |
        +---- siguiente ciclo --+
 ```
+
+## Estado actual
+
+**Estable**
+
+- Sprints multiagente definidos en YAML con fases `work` y `gate`
+- Bucle de puerta `GO` / `CAUTION` / `REVERT` con estrategias git de snapshot/revert
+- Flujo CLI: `joshua run`, `joshua status`, `joshua evolve`
+- Abstracción de runners para Claude Code, Codex, Aider y CLIs custom
+- Plano de control HTTP, notificaciones, checkpoints y logs por ciclo
+
+**Experimental**
+
+- Despliegues desatendidos sobre infraestructura de producción real
+- Calidad de la wiki autoaprendida y evolución de prompts en sprints largos
+- Dominios no software que necesiten prompts, políticas y scripts wrapper propios
+- Runners custom que ejecuten comandos shell arbitrarios
 
 ## Cómo funciona
 
@@ -82,14 +106,14 @@ joshua evolve config.yaml
 pip install joshua-agent
 ```
 
-**Ejemplo 1 — Sprint de desarrollo.** Tres agentes escriben código, cazan bugs y revisan. QA emite veredictos. El código bueno se despliega.
+**Ejemplo 1 — Sprint de desarrollo safe by default.** Empieza con un script wrapper controlado por ti. Mete build, tests, migraciones y health checks ahí, en vez de enchufar shell ad hoc en la primera demo.
 
 ```yaml
 # dev-sprint.yaml
 project:
   name: my-app
   path: ~/my-app
-  deploy: "npm run build && npm start"
+  deploy: "./deploy.sh"   # Empieza aquí: encapsula el despliegue en un único script
 
 agents:
   dev:
@@ -105,8 +129,10 @@ agents:
     skill: qa
 
 sprint:
-  cycle_sleep: 300
+  cycle_sleep: 600
 ```
+
+Usa un wrapper para los despliegues. Hace el primer sprint más reproducible y te deja añadir tests, health checks, migraciones o rollback hooks sin reescribir el YAML.
 
 **Ejemplo 2 — Sprint ejecutivo.** Sin código. Sin comando de deploy. Los agentes analizan documentos, auditan costes y verifican cumplimiento normativo. Mismo framework, distintos skills.
 
@@ -193,7 +219,7 @@ Sleeping 600s before next cycle...
 project:
   name: mi-proyecto
   path: ~/mi-proyecto              # Cualquier carpeta — código, docs, informes, datos
-  deploy: "bash deploy.sh"         # Opcional — omitir para sprints sin código
+  deploy: "./deploy.sh"            # Opcional — mejor detrás de un wrapper que controles
   health_url: http://localhost:3000/health  # Opcional
 
 runner:

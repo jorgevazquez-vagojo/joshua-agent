@@ -244,6 +244,9 @@ def _make_callback(callback_url: str):
 
 
 def _status_from_entry(sid: str, entry: SprintEntry) -> SprintStatus:
+    last_gate_severity = getattr(entry.sprint, "last_gate_severity", "none")
+    last_gate_issues = getattr(entry.sprint, "last_gate_issues", [])
+    last_verdict_source = getattr(entry.sprint, "last_verdict_source", "none")
     return SprintStatus(
         sprint_id=sid,
         project=entry.sprint.project_name,
@@ -254,10 +257,10 @@ def _status_from_entry(sid: str, entry: SprintEntry) -> SprintStatus:
         status="running" if entry.thread.is_alive() else "completed",
         started_at=entry.started_at,
         error=entry.error,
-        last_verdict=entry.sprint.last_verdict_source if entry.sprint.last_gate_severity != "none" else None,
-        last_verdict_severity=entry.sprint.last_gate_severity,
-        last_gate_issues_count=len(entry.sprint.last_gate_issues),
-        last_verdict_source=entry.sprint.last_verdict_source,
+        last_verdict=last_verdict_source if last_gate_severity != "none" else None,
+        last_verdict_severity=last_gate_severity,
+        last_gate_issues_count=len(last_gate_issues),
+        last_verdict_source=last_verdict_source,
     )
 
 
@@ -349,8 +352,11 @@ def start_sprint(req: StartSprintRequest):
     sprint_id = str(uuid.uuid4())[:8]
     sprint = Sprint(config)
 
-    # Per-sprint log file
-    sprint.setup_sprint_logger(sprint_id, SPRINT_LOG_DIR)
+    # Per-sprint log file. Tests may inject a lightweight Sprint stub without
+    # file logging support, so keep this optional.
+    setup_logger = getattr(sprint, "setup_sprint_logger", None)
+    if callable(setup_logger):
+        setup_logger(sprint_id, SPRINT_LOG_DIR)
 
     # Hub integration (if configured)
     setup_hub_integration(sprint, config)
