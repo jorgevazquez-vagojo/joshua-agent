@@ -117,6 +117,7 @@ class Sprint:
         self.last_verdict_source: str = "none"  # "json" | "legacy" | "default"
         self.consecutive_errors = 0
         self._triggered = False  # for on_demand mode
+        self._go_streak = 0  # consecutive GO streak for adaptive sleep
 
         # Per-sprint logger — replaced by setup_sprint_logger() when run via server
         self.sprint_id: str = ""
@@ -335,9 +336,28 @@ class Sprint:
                 if self.digest_every and self.cycle % self.digest_every == 0:
                     self._send_digest()
 
-                # Sleep (longer after REVERT)
-                sleep_time = self.revert_sleep if verdict == "REVERT" else self.cycle_sleep
-                self.sprint_logger.info(f"Sleeping {sleep_time}s before next cycle...")
+                # Adaptive cycle sleep
+                # Shrink 20% per cycle on GO streak >= 3, grow 50% on REVERT
+                # Capped at base_sleep x [0.5, 3.0]
+                if verdict == "REVERT":
+                    self._go_streak = 0
+                    sleep_time = self.revert_sleep or self.cycle_sleep
+                    adaptive = min(sleep_time * 1.5, self.cycle_sleep * 3.0)
+                elif verdict == "GO":
+                    self._go_streak += 1
+                    if self._go_streak >= 3:
+                        factor = 0.8 ** (self._go_streak - 2)
+                        adaptive = max(self.cycle_sleep * factor, self.cycle_sleep * 0.5)
+                    else:
+                        adaptive = float(self.cycle_sleep)
+                else:
+                    self._go_streak = 0
+                    adaptive = float(self.cycle_sleep)
+                sleep_time = round(adaptive)
+                self.sprint_logger.info(
+                    f"Sleeping {sleep_time}s before next cycle "
+                    f"(streak={self._go_streak}, verdict={verdict})..."
+                )
                 if self._wait_or_stop(sleep_time):
                     break
 

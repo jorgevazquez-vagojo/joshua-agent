@@ -54,6 +54,33 @@ def _walk_interpolate(obj):
     return obj
 
 
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Recursively merge override into base. Override wins on conflicts."""
+    result = dict(base)
+    for k, v in override.items():
+        if k in result and isinstance(result[k], dict) and isinstance(v, dict):
+            result[k] = _deep_merge(result[k], v)
+        else:
+            result[k] = v
+    return result
+
+
+def _resolve_base(raw: dict, config_path: Path, _depth: int = 0) -> dict:
+    """Resolve `base:` inheritance — load parent config and deep-merge."""
+    if _depth > 10:
+        raise ValueError("Config inheritance depth > 10 — possible circular reference")
+    base_ref = raw.pop("base", None)
+    if not base_ref:
+        return raw
+    base_path = (config_path.parent / base_ref).resolve()
+    if not base_path.exists():
+        raise FileNotFoundError(f"base config not found: {base_ref} (resolved: {base_path})")
+    with open(base_path) as f:
+        base_raw = yaml.safe_load(f) or {}
+    base_raw = _resolve_base(base_raw, base_path, _depth + 1)
+    return _deep_merge(base_raw, raw)
+
+
 def load_config(path: str | Path) -> dict:
     """Load and validate a joshua YAML config file."""
     path = Path(path).expanduser().resolve()
@@ -65,6 +92,8 @@ def load_config(path: str | Path) -> dict:
 
     if not isinstance(raw, dict):
         raise ValueError(f"Config must be a YAML mapping, got {type(raw).__name__}")
+
+    raw = _resolve_base(raw, path)
 
     config = _walk_interpolate(raw)
 

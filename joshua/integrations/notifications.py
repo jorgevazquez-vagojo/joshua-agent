@@ -211,6 +211,46 @@ class DiscordNotifier(Notifier):
         urllib.request.urlopen(req, timeout=10)
 
 
+class EmailNotifier(Notifier):
+    """Send notifications via SMTP email."""
+
+    def __init__(self, config: dict):
+        super().__init__()
+        self.host = config.get("host", "")
+        self.port = int(config.get("port", 587))
+        self.user = config.get("user", "")
+        self.password = config.get("password", "")
+        self.from_addr = config.get("from", self.user)
+        self.to_addrs = config.get("to", "")
+        self.use_tls = config.get("tls", True)
+        self._failures_before_disable = config.get("failures_before_disable",
+                                                    DEFAULT_FAILURES_BEFORE_DISABLE)
+        if not self.host or not self.to_addrs:
+            log.warning("Email: host or to missing, notifications disabled")
+            self._disabled = True
+
+    def _redact_error(self, error: str) -> str:
+        if self.password:
+            error = error.replace(self.password, "[REDACTED]")
+        return error
+
+    def _send(self, text: str, agent_name: str = "", silent: bool = False):
+        import smtplib
+        from email.message import EmailMessage
+        msg = EmailMessage()
+        msg["From"] = self.from_addr
+        msg["To"] = self.to_addrs if isinstance(self.to_addrs, str) else ", ".join(self.to_addrs)
+        subject_prefix = f"[{agent_name}] " if agent_name else ""
+        msg["Subject"] = f"{subject_prefix}Joshua: {text[:80]}"
+        msg.set_content(text)
+        with smtplib.SMTP(self.host, self.port, timeout=15) as smtp:
+            if self.use_tls:
+                smtp.starttls()
+            if self.user and self.password:
+                smtp.login(self.user, self.password)
+            smtp.send_message(msg)
+
+
 class NullNotifier(Notifier):
     """No-op notifier (notifications disabled)."""
 
@@ -231,5 +271,7 @@ def notifier_factory(config: dict) -> Notifier:
         return DiscordNotifier(notif_config)
     elif notif_type == "webhook":
         return WebhookNotifier(notif_config)
+    elif notif_type == "email":
+        return EmailNotifier(notif_config)
     else:
         return NullNotifier()

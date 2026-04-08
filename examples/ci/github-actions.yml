@@ -1,0 +1,75 @@
+# joshua-agent — GitHub Actions template
+# Copy to your project's .github/workflows/joshua.yml and customize.
+#
+# Required secrets:
+#   JOSHUA_INTERNAL_TOKEN  — at least 16 chars, generate with:
+#                            python3 -c "import secrets; print(secrets.token_hex(32))"
+#
+# Optional secrets:
+#   TELEGRAM_TOKEN / TELEGRAM_CHAT_ID — for notifications
+
+name: Joshua Sprint
+
+on:
+  schedule:
+    - cron: '0 2 * * *'   # Daily at 02:00 UTC
+  workflow_dispatch:        # Manual trigger from GitHub UI
+
+permissions:
+  contents: write           # Required if joshua writes commits (git_strategy: snapshot)
+
+jobs:
+  sprint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120    # Matches sprint.max_hours: 2
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # Full history for git_strategy: snapshot
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install joshua-agent
+        run: pip install "joshua-agent[all]"
+
+      # Install your runner (pick one)
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+        # env:
+        #   ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      - name: Pre-flight check
+        run: joshua doctor joshua.yaml
+
+      - name: Run sprint
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          joshua run joshua.yaml \
+            --max-cycles 10 \
+            --max-hours 1.5
+
+      - name: Export sprint report
+        if: always()
+        run: joshua export .joshua --format markdown --output sprint-report.md
+
+      - name: Upload sprint artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprint-report-${{ github.run_number }}
+          path: |
+            sprint-report.md
+            .joshua/results.tsv
+            .joshua/logs/sprint.log
+          retention-days: 30
+
+      - name: Sprint status (CI-friendly JSON)
+        if: always()
+        run: joshua status .joshua --json | tee sprint-status.json

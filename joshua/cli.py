@@ -291,10 +291,13 @@ def evolve(config: str):
 @main.command()
 @click.option("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1 — loopback only; use 0.0.0.0 to expose on all interfaces)")
 @click.option("--port", "-p", default=8100, help="Port")
-def serve(host: str, port: int):
+@click.option("--cert-file", default="", help="TLS certificate file (PEM) — enables HTTPS")
+@click.option("--key-file", default="", help="TLS private key file (PEM) — required with --cert-file")
+def serve(host: str, port: int, cert_file: str, key_file: str):
     """Start the Joshua HTTP server for programmatic sprint management.
 
     Example: joshua serve --port 8100
+             joshua serve --cert-file cert.pem --key-file key.pem
     """
     try:
         import uvicorn
@@ -309,8 +312,24 @@ def serve(host: str, port: int):
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     log.addHandler(handler)
 
-    click.echo(f"Joshua server starting on {host}:{port}")
-    uvicorn.run("joshua.server:app", host=host, port=port, log_level="info")
+    ssl_kwargs = {}
+    if cert_file or key_file:
+        if not cert_file or not key_file:
+            click.echo("Both --cert-file and --key-file must be provided together.")
+            sys.exit(1)
+        if not Path(cert_file).exists():
+            click.echo(f"Certificate file not found: {cert_file}")
+            sys.exit(1)
+        if not Path(key_file).exists():
+            click.echo(f"Key file not found: {key_file}")
+            sys.exit(1)
+        ssl_kwargs = {"ssl_certfile": cert_file, "ssl_keyfile": key_file}
+        scheme = "https"
+    else:
+        scheme = "http"
+
+    click.echo(f"Joshua server starting on {scheme}://{host}:{port}")
+    uvicorn.run("joshua.server:app", host=host, port=port, log_level="info", **ssl_kwargs)
 
 
 @main.command()
@@ -714,6 +733,232 @@ def export(state_dir: str, fmt: str, output: str, cycles: int):
         click.echo(f"Report written to: {output}")
     else:
         click.echo(result)
+
+
+@main.command()
+@click.argument("state_dir", type=click.Path(), default=".joshua")
+@click.option("--follow", "-f", is_flag=True, help="Follow log output (like tail -f)")
+@click.option("--lines", "-n", default=50, type=int, help="Number of lines to show (default: 50)")
+def logs(state_dir: str, follow: bool, lines: int):
+    """Tail the sprint log file.
+
+    Example: joshua logs .joshua
+             joshua logs .joshua --follow
+             joshua logs .joshua -n 100 -f
+    """
+    import time as _time
+
+    state_path = Path(state_dir).expanduser().resolve()
+    log_file = state_path / "logs" / "sprint.log"
+
+    if not log_file.exists():
+        click.echo(f"Log file not found: {log_file}")
+        click.echo("Run a sprint first.")
+        sys.exit(1)
+
+    # Print last N lines
+    content = log_file.read_text(encoding="utf-8", errors="replace")
+    all_lines = content.splitlines()
+    for line in all_lines[-lines:]:
+        click.echo(line)
+
+    if not follow:
+        return
+
+    # Follow mode — poll for new content
+    try:
+        with open(log_file, encoding="utf-8", errors="replace") as f:
+            f.seek(0, 2)  # seek to end
+            while True:
+                line = f.readline()
+                if line:
+                    click.echo(line, nl=False)
+                else:
+                    _time.sleep(0.3)
+    except KeyboardInterrupt:
+        pass
+
+
+@main.command()
+@click.argument("shell", type=click.Choice(["bash", "zsh", "fish"]))
+def completion(shell: str):
+    """Output shell completion script.
+
+    Example: joshua completion bash >> ~/.bashrc
+             joshua completion zsh >> ~/.zshrc
+             joshua completion fish > ~/.config/fish/completions/joshua.fish
+    """
+    if shell == "bash":
+        script = '_JOSHUA_COMPLETE=bash_source joshua'
+        click.echo(f'eval "$({script})"')
+        click.echo(f"# Add to ~/.bashrc: eval \"$({script})\"")
+    elif shell == "zsh":
+        script = '_JOSHUA_COMPLETE=zsh_source joshua'
+        click.echo(f'eval "$({script})"')
+        click.echo(f"# Add to ~/.zshrc: eval \"$({script})\"")
+    elif shell == "fish":
+        click.echo("_JOSHUA_COMPLETE=fish_source joshua | source")
+        click.echo("# Add to ~/.config/fish/completions/joshua.fish:")
+        click.echo("# _JOSHUA_COMPLETE=fish_source joshua | source")
+
+
+@main.command()
+@click.argument("fleet_config", type=click.Path(exists=True))
+@click.option("--dry-run", is_flag=True, help="Parse configs and exit without running")
+def fleet(fleet_config: str, dry_run: bool):
+    """Run multiple projects in parallel from a fleet config.
+
+    Fleet config YAML format:
+      parallel: true        # run projects concurrently (default: false)
+      projects:
+        - config: project-a.yaml
+          max_cycles: 3
+        - config: project-b.yaml
+          max_cycles: 5
+
+    Example: joshua fleet fleet.yaml
+             joshua fleet fleet.yaml --dry-run
+    """
+    import yaml as _yaml
+    import threading as _threading
+    from joshua.config import load_config
+    from joshua.sprint import Sprint
+
+    fleet_path = Path(fleet_config).expanduser().resolve()
+    with open(fleet_path) as f:
+        fleet_cfg = _yaml.safe_load(f)
+
+    if not isinstance(fleet_cfg, dict) or "projects" not in fleet_cfg:
+        click.echo("Fleet config must have a 'projects:' list.")
+        sys.exit(1)
+
+    projects = fleet_cfg.get("projects", [])
+    parallel = fleet_cfg.get("parallel", False)
+
+    click.echo(f"Fleet: {len(projects)} project(s) — parallel={parallel}")
+
+    sprints = []
+    for entry in projects:
+        cfg_path = fleet_path.parent / entry["config"]
+        cfg = load_config(str(cfg_path))
+        # Apply per-project overrides from fleet config
+        if "max_cycles" in entry:
+            cfg.setdefault("sprint", {})["max_cycles"] = entry["max_cycles"]
+        if "max_hours" in entry:
+            cfg.setdefault("sprint", {})["max_hours"] = entry["max_hours"]
+        sprints.append((entry["config"], cfg))
+        click.echo(f"  Loaded: {entry['config']} — {cfg['project']['name']}")
+
+    if dry_run:
+        click.echo("Dry run — configs OK")
+        return
+
+    import logging
+    log = logging.getLogger("joshua")
+    log.setLevel(logging.INFO)
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    log.addHandler(handler)
+
+    if parallel:
+        threads = []
+        for cfg_file, cfg in sprints:
+            sprint = Sprint(cfg)
+            t = _threading.Thread(target=sprint.run, name=cfg["project"]["name"], daemon=False)
+            threads.append(t)
+        click.echo("Starting all sprints in parallel...")
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    else:
+        for cfg_file, cfg in sprints:
+            click.echo(f"\nStarting: {cfg['project']['name']}")
+            sprint = Sprint(cfg)
+            sprint.run()
+
+    click.echo("Fleet complete.")
+
+
+@main.command()
+@click.argument("state_dirs", nargs=-1, type=click.Path())
+@click.option("--output", "-o", default="global-lessons.md",
+              help="Output file for consolidated lessons (default: global-lessons.md)")
+@click.option("--min-frequency", "-m", default=2, type=int,
+              help="Min times a lesson must appear across sprints to be included (default: 2)")
+def distill(state_dirs: tuple, output: str, min_frequency: int):
+    """Consolidate lessons from multiple sprint state dirs into a global knowledge file.
+
+    Reads lessons.json from each state dir, finds lessons repeated across sprints,
+    and writes a curated Markdown summary.
+
+    Example: joshua distill .joshua project-b/.joshua --output global.md
+             joshua distill */. --min-frequency 3
+    """
+    import json as _json
+    import collections
+
+    if not state_dirs:
+        click.echo("Provide at least one state dir (e.g. .joshua project-b/.joshua)")
+        sys.exit(1)
+
+    all_lessons: list[dict] = []
+    for sdir in state_dirs:
+        lessons_path = Path(sdir).expanduser().resolve() / "lessons.json"
+        if not lessons_path.exists():
+            click.echo(f"  Skipping {sdir}: no lessons.json")
+            continue
+        try:
+            data = _json.loads(lessons_path.read_text())
+            for entry in data:
+                entry["_source"] = str(sdir)
+                all_lessons.append(entry)
+            click.echo(f"  Loaded {len(data)} lessons from {sdir}")
+        except Exception as e:
+            click.echo(f"  Error reading {sdir}: {e}")
+
+    if not all_lessons:
+        click.echo("No lessons found.")
+        sys.exit(0)
+
+    # Count lesson text frequency (normalize whitespace)
+    freq: dict[str, list[dict]] = collections.defaultdict(list)
+    for lesson in all_lessons:
+        key = " ".join(lesson.get("lesson", "").split()).lower()
+        freq[key].append(lesson)
+
+    # Filter by min frequency
+    distilled = [
+        entries[0] for key, entries in sorted(freq.items(), key=lambda x: -len(x[1]))
+        if len(entries) >= min_frequency
+    ]
+
+    if not distilled:
+        click.echo(f"No lessons appeared in >= {min_frequency} sprints. Try lowering --min-frequency.")
+        sys.exit(0)
+
+    from datetime import datetime as _dt
+    lines = [
+        "# Global Lessons",
+        "",
+        f"_Distilled from {len(state_dirs)} sprint(s) — {_dt.now().strftime('%Y-%m-%d %H:%M')}_",
+        f"_Min frequency: {min_frequency} | {len(distilled)} lessons retained from {len(all_lessons)} total_",
+        "",
+    ]
+    for i, lesson in enumerate(distilled, 1):
+        text = lesson.get("lesson", "").strip()
+        agent = lesson.get("agent", "")
+        lines.append(f"## {i}. {text[:80]}")
+        if agent:
+            lines.append(f"_Agent: {agent}_")
+        if len(text) > 80:
+            lines.append("")
+            lines.append(text)
+        lines.append("")
+
+    out_path = Path(output)
+    out_path.write_text("\n".join(lines), encoding="utf-8")
+    click.echo(f"Distilled {len(distilled)} lessons -> {output}")
 
 
 if __name__ == "__main__":

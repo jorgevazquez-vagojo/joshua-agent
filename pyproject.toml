@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "joshua-agent"
-version = "1.1.0"
+version = "1.2.0"
 description = "Autonomous gated software sprints. Define your team in YAML — dev, bug-hunter, QA. Gate agent issues GO/CAUTION/REVERT. Auto-deploy on GO, auto-revert on REVERT. Self-learning wiki across cycles. Works with Claude Code, Aider, Codex, or any LLM CLI. Shall we play a game?"
 readme = "README.md"
 license = "MIT"

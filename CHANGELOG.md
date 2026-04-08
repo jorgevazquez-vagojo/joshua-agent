@@ -2,6 +2,25 @@
 
 All notable changes to joshua-agent are documented here.
 
+## [1.2.0] — 2026-04-08
+
+### Added
+- **Prometheus metrics** (`GET /metrics`): exposes `joshua_sprints_total`, `joshua_sprints_running`, `joshua_verdicts_total{verdict=...}`, `joshua_errors_total`, `joshua_tokens_total`, `joshua_uptime_seconds` in Prometheus text format. No auth required. No external library needed.
+- **Web UI dashboard** (`GET /ui`): single-page HTML dashboard (no auth, no JS framework). Displays active sprints, token totals, uptime. Auto-refreshes every 10 s via meta refresh.
+- **Audit log**: `@app.middleware("http")` writes JSONL entries (`ts`, `method`, `path`, `status`, `duration_ms`, `token_hash`) to `.joshua/audit.jsonl` (override with `JOSHUA_AUDIT_LOG`). `GET /audit` endpoint (auth required) returns last N lines (max 5 000).
+- **`joshua logs`**: tail sprint log file. Options: `--follow`/`-f` (live tail), `--lines`/`-n N` (last N lines, default 50). Searches common log paths automatically.
+- **`joshua completion bash|zsh|fish`**: generate shell completion scripts via Click's `_JOSHUA_COMPLETE` env var mechanism.
+- **`joshua fleet fleet.yaml`**: run multiple projects in one command. YAML has `projects:` list and optional `parallel: true` for concurrent execution. `--dry-run` prints what would run.
+- **`joshua distill`**: consolidate lessons across multiple sprint state dirs. Reads `lessons.json` from each dir, finds lessons appearing ≥ `--min-frequency` times (default 2), outputs Markdown. `--output FILE` or stdout.
+- **`joshua serve --cert-file`/`--key-file`**: TLS support. Both flags required together; validates files exist before starting uvicorn.
+- **Email notifier** (`notifications.type: email`): sends sprint events via SMTP. Fields: `host`, `port` (default 587), `user`, `password`, `to`, `tls` (default true). Password redacted in error logs. Circuit breaker via parent `Notifier` class.
+- **Config inheritance** (`base:` key): child YAML specifies `base: path/to/base.yaml`; values deep-merged (child wins). Circular-reference guard (max depth 10). Resolved before env-var interpolation.
+- **Adaptive cycle sleep**: `_go_streak` counter. After ≥3 consecutive GO verdicts, sleep shrinks by `0.8^(streak-2)` (floor: `base × 0.5`). REVERT grows sleep to `min(revert_sleep × 1.5, base × 3.0)`. Resets on CAUTION/REVERT.
+- **CI templates** (`examples/ci/`): `github-actions.yml` (schedule + `workflow_dispatch`, artifacts, `joshua doctor`) and `gitlab-ci.yml` (two stages, pip cache, rules for schedule/web).
+
+### Changed
+- `NotificationsConfig.type` now includes `"email"` in the allowed literal.
+
 ## [1.1.0] — 2026-04-08
 
 ### Added

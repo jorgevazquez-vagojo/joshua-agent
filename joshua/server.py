@@ -26,7 +26,7 @@ from urllib.parse import urlparse
 from fastapi import FastAPI, HTTPException, Depends, Header, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, PlainTextResponse, HTMLResponse
 from pydantic import BaseModel, ValidationError, field_validator
 
 from joshua import __version__
@@ -126,6 +126,35 @@ app.add_middleware(
 _rate_limit_state: dict[str, list[float]] = {}
 _RATE_LIMIT_WINDOW = 60  # seconds
 _RATE_LIMIT_MAX = int(os.environ.get("JOSHUA_RATE_LIMIT", "30"))  # requests per window
+
+# Audit log
+_AUDIT_LOG_PATH = Path(os.environ.get("JOSHUA_AUDIT_LOG", ".joshua/audit.jsonl"))
+
+
+@app.middleware("http")
+async def audit_log(request: Request, call_next):
+    """Write a JSONL audit entry for every API call."""
+    import hashlib
+    t0 = time.time()
+    response = await call_next(request)
+    duration_ms = round((time.time() - t0) * 1000)
+    token = request.headers.get("x-internal-token", "")
+    token_hash = hashlib.sha256(token.encode()).hexdigest()[:12] if token else "anonymous"
+    try:
+        _AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "ts": datetime.now().isoformat(timespec="milliseconds"),
+            "method": request.method,
+            "path": str(request.url.path),
+            "status": response.status_code,
+            "duration_ms": duration_ms,
+            "token_hash": token_hash,
+        }
+        with open(_AUDIT_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(__import__("json").dumps(entry) + "\n")
+    except Exception:
+        pass  # never let audit log break the request
+    return response
 
 
 @app.middleware("http")
@@ -291,6 +320,114 @@ def health():
         "sprints_total": total,
         "sprints_running": running,
     }
+
+
+@app.get("/metrics")
+def metrics():
+    """Prometheus text format metrics — no auth required."""
+    running = _db.running_count() if _db else 0
+    total = len(_db.list_sprints()) if _db else 0
+    # Aggregate stats across all sprints
+    go = caution = revert = errors = tokens = 0
+    if _db:
+        for row in _db.list_sprints():
+            s = row.get("stats") or {}
+            go += s.get("go", 0)
+            caution += s.get("caution", 0)
+            revert += s.get("revert", 0)
+            errors += s.get("errors", 0)
+            tokens += s.get("total_tokens", 0)
+    uptime = round(time.time() - _server_start, 1)
+    lines = [
+        "# HELP joshua_sprints_total Total sprints ever created",
+        "# TYPE joshua_sprints_total counter",
+        f"joshua_sprints_total {total}",
+        "# HELP joshua_sprints_running Currently running sprints",
+        "# TYPE joshua_sprints_running gauge",
+        f"joshua_sprints_running {running}",
+        "# HELP joshua_verdicts_total Verdicts issued by gate agents",
+        "# TYPE joshua_verdicts_total counter",
+        f'joshua_verdicts_total{{verdict="go"}} {go}',
+        f'joshua_verdicts_total{{verdict="caution"}} {caution}',
+        f'joshua_verdicts_total{{verdict="revert"}} {revert}',
+        "# HELP joshua_errors_total Agent execution errors",
+        "# TYPE joshua_errors_total counter",
+        f"joshua_errors_total {errors}",
+        "# HELP joshua_tokens_total Estimated output tokens consumed",
+        "# TYPE joshua_tokens_total counter",
+        f"joshua_tokens_total {tokens}",
+        "# HELP joshua_uptime_seconds Server uptime in seconds",
+        "# TYPE joshua_uptime_seconds gauge",
+        f"joshua_uptime_seconds {uptime}",
+        "",
+    ]
+    return PlainTextResponse("\n".join(lines), media_type="text/plain; version=0.0.4")
+
+
+_UI_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="refresh" content="10">
+<title>Joshua Dashboard</title>
+<style>
+  body { font-family: monospace; background: #0d1117; color: #e6edf3; padding: 2rem; margin: 0; }
+  h1 { color: #58a6ff; border-bottom: 1px solid #30363d; padding-bottom: .5rem; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 1rem; margin: 1rem 0; }
+  .go { color: #3fb950; } .caution { color: #d29922; } .revert { color: #f85149; }
+  .running { color: #58a6ff; } .stopped { color: #8b949e; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; color: #8b949e; padding: .3rem .5rem; }
+  td { padding: .3rem .5rem; border-top: 1px solid #21262d; }
+  .badge { padding: .1rem .5rem; border-radius: 4px; font-size: .85em; }
+  .badge-go { background: #0f3722; color: #3fb950; }
+  .badge-caution { background: #2d1f00; color: #d29922; }
+  .badge-revert { background: #300e0e; color: #f85149; }
+  .badge-running { background: #0c2d6b; color: #58a6ff; }
+  .stat { display: inline-block; margin-right: 2rem; }
+  .stat-val { font-size: 2rem; font-weight: bold; color: #58a6ff; }
+  .stat-lbl { color: #8b949e; font-size: .85em; }
+  footer { color: #8b949e; font-size: .8em; margin-top: 2rem; }
+</style>
+</head>
+<body>
+<h1>&#9881; Joshua Dashboard</h1>
+<div id="content">Loading...</div>
+<footer>Auto-refreshes every 10s &bull; <a href="/metrics" style="color:#58a6ff">Prometheus</a> &bull; <a href="/health" style="color:#58a6ff">Health</a></footer>
+<script>
+async function load() {
+  try {
+    const r = await fetch('/');
+    const d = await r.json();
+    let html = '<div class="card">';
+    html += '<span class="stat"><div class="stat-val">' + d.sprints_running + '</div><div class="stat-lbl">Running</div></span>';
+    html += '<span class="stat"><div class="stat-val">' + d.sprints_total + '</div><div class="stat-lbl">Total</div></span>';
+    html += '<span class="stat"><div class="stat-val">' + d.uptime_s + 's</div><div class="stat-lbl">Uptime</div></span>';
+    html += '</div>';
+    if (d.running && d.running.length > 0) {
+      html += '<div class="card"><h2 style="margin-top:0;color:#e6edf3">Active Sprints</h2><table><tr><th>ID</th><th>Project</th><th>Cycle</th><th>Started</th></tr>';
+      for (const s of d.running) {
+        html += '<tr><td><code>' + s.sprint_id + '</code></td><td>' + s.project + '</td><td>' + s.cycle + '</td><td>' + (s.started_at||'').slice(0,19).replace('T',' ') + '</td></tr>';
+      }
+      html += '</table></div>';
+    } else {
+      html += '<div class="card" style="color:#8b949e">No sprints currently running.</div>';
+    }
+    document.getElementById('content').innerHTML = html;
+  } catch(e) {
+    document.getElementById('content').innerHTML = '<div class="card" style="color:#f85149">Failed to load data: ' + e + '</div>';
+  }
+}
+load();
+</script>
+</body>
+</html>"""
+
+
+@app.get("/ui", include_in_schema=False)
+def dashboard_ui():
+    """Web UI dashboard — no auth required. Auto-refreshes every 10s."""
+    return HTMLResponse(_UI_HTML)
 
 
 @app.post("/sprints", response_model=SprintStatus, dependencies=[Depends(verify_token)])
@@ -543,3 +680,18 @@ def get_sprint_report(sprint_id: str):
         "tokens_total": tokens_total,
         "cost_estimate_usd": cost_usd,
     }
+
+
+@app.get("/audit", dependencies=[Depends(verify_token)])
+def get_audit_log(lines: int = Query(default=100, ge=1, le=5000)):
+    """Return last N lines of the audit log (max 5000)."""
+    import json as _json
+    if not _AUDIT_LOG_PATH.exists():
+        return []
+    try:
+        all_lines = _AUDIT_LOG_PATH.read_text(encoding="utf-8", errors="replace").splitlines()
+        tail = all_lines[-lines:]
+        return [_json.loads(line) for line in tail if line.strip()]
+    except Exception as exc:
+        log.warning(f"Failed to read audit log: {exc}")
+        return []

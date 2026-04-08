@@ -99,11 +99,18 @@ class MemoryConfig(BaseModel):
 
 
 class NotificationsConfig(BaseModel):
-    type: Literal["none", "telegram", "slack", "webhook", "discord"] = "none"
+    type: Literal["none", "telegram", "slack", "webhook", "discord", "email"] = "none"
     token: str = ""
     chat_id: str = ""
     webhook_url: str = ""
     url: str = ""
+    host: str = ""
+    port: int = 587
+    user: str = ""
+    password: str = ""
+    to: str = ""
+    tls: bool = True
+    model_config = {"extra": "allow"}
 
 
 class PreflightConfig(BaseModel):
