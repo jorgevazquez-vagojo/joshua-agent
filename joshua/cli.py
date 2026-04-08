@@ -165,117 +165,85 @@ def status(state_dir: str, watch: bool, interval: int, as_json: bool, no_color: 
 
 
 @main.command()
-@click.argument("config", type=click.Path(exists=True), required=False)
-def doctor(config: str | None):
-    """Pre-flight diagnostic: check environment before first run.
+@click.argument("config", type=click.Path(), required=False, default="")
+def doctor(config: str):
+    """Diagnose your joshua installation and sprint config.
 
-    Validates the runner binary, git, project path, and config (if provided).
+    Checks agent binaries, tokens, git access, Python version, and config validity.
 
-    Example: joshua doctor
-             joshua doctor my-project.yaml
+    \b
+    Example:
+      joshua doctor
+      joshua doctor my-project.yaml
     """
+    import os
     import shutil
 
-    checks: list[tuple[str, bool, str, str]] = []  # (label, ok, detail, fix)
+    passed = 0
+    issues = 0
 
-    def check(label: str, ok: bool, detail: str = "", fix: str = ""):
-        checks.append((label, ok, detail, fix))
-        icon = "OK  " if ok else "FAIL"
-        msg = f"  [{icon}] {label}"
+    def check(label: str, ok: bool, detail: str = ""):
+        nonlocal passed, issues
+        icon = "✓" if ok else "✗"
+        msg = f"  {icon} {label}"
         if detail:
             msg += f": {detail}"
         click.echo(msg)
-        if not ok and fix:
-            click.echo(f"         → {fix}")
+        if ok:
+            passed += 1
+        else:
+            issues += 1
 
     click.echo("")
     click.echo("  joshua doctor")
     click.echo("  ─────────────")
 
-    # Python version
+    # 1. Python version ≥ 3.10
     major, minor = sys.version_info[:2]
     check("Python version", major == 3 and minor >= 10,
-          f"{major}.{minor} (need 3.10+)",
-          fix="Install Python 3.10+ from https://python.org or use pyenv")
+          f"{major}.{minor}" + ("" if (major == 3 and minor >= 10) else " (need 3.10+)"))
 
-    # Config validation
+    # 2. LLM agent binaries on PATH
+    for bin_name in ("claude", "aider", "codex", "openai"):
+        found = shutil.which(bin_name)
+        check(f"Binary: {bin_name}", bool(found), found or "not found in PATH")
+
+    # 3. Env tokens (non-empty check only)
+    for token_name in ("GITHUB_TOKEN", "GITLAB_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+        present = bool(os.environ.get(token_name, "").strip())
+        check(f"Token: {token_name}", present, "present" if present else "not set")
+
+    # 4. Config validation (if provided)
     cfg = None
     if config:
-        try:
-            from joshua.config import load_config
-            cfg = load_config(config)
-            check("Config valid", True, cfg["project"]["name"])
-        except Exception as e:
-            check("Config valid", False, str(e)[:120],
-                  fix=f"Fix the YAML error above, then re-run: joshua doctor {config}")
-    else:
-        check("Config (none provided)", True, "skip — pass a YAML file to validate")
-
-    # Runner binary
-    if cfg:
-        runner_type = cfg.get("runner", {}).get("type", "claude")
-        binary_map = {"claude": "claude", "aider": "aider", "codex": "codex"}
-        binary = binary_map.get(runner_type, "")
-        if binary:
-            found = shutil.which(binary)
-            check(f"Runner binary ({binary})", bool(found),
-                  found or "not found in PATH",
-                  fix=f"Install {binary}: see https://github.com/anthropics/claude-code" if binary == "claude" else f"pip install {binary}")
+        if not Path(config).exists():
+            check("Config file exists", False, f"not found: {config}")
         else:
-            check("Runner binary (custom)", True, "custom runner — skipping binary check")
-    else:
-        # Check common runners
-        for bin_name in ("claude", "aider", "codex"):
-            found = shutil.which(bin_name)
-            if found:
-                check(f"Runner binary ({bin_name})", True, found)
-                break
-        else:
-            check("Runner binary", False,
-                  "none of claude/aider/codex found in PATH")
-
-    # git
-    git_found = shutil.which("git")
-    check("git", bool(git_found), git_found or "not found in PATH",
-          fix="Install git: https://git-scm.com/downloads")
-
-    # Project path
-    if cfg:
-        project_path = Path(cfg["project"]["path"])
-        exists = project_path.is_dir()
-        if exists:
             try:
-                test_file = project_path / ".joshua_doctor_test"
-                test_file.touch()
-                test_file.unlink()
-                writable = True
-            except OSError:
-                writable = False
-            check("Project path", writable,
-                  str(project_path) + ("" if writable else " (not writable)"),
-                  fix=f"Fix permissions: chmod u+w {project_path}" if not writable else "")
-        else:
-            check("Project path", False, f"does not exist: {project_path}",
-                  fix=f"Create it: mkdir -p {project_path}  or fix project.path in your config")
+                from joshua.config import load_config
+                cfg = load_config(config)
+                check("Config valid", True, cfg["project"]["name"])
+                # Check project path exists
+                project_path = Path(cfg["project"]["path"])
+                check("Project path exists", project_path.is_dir(), str(project_path))
+                # Check git repo (.git dir)
+                git_dir = project_path / ".git"
+                check("Git repo", git_dir.is_dir(), str(project_path))
+            except Exception as e:
+                check("Config valid", False, str(e)[:120])
 
-    # Notifications
-    if cfg:
-        notif = cfg.get("notifications", {})
-        notif_type = notif.get("type", "none")
-        if notif_type != "none":
-            has_creds = bool(notif.get("token") or notif.get("webhook_url") or notif.get("url"))
-            check(f"Notifications ({notif_type})", has_creds,
-                  "credentials present" if has_creds else "missing token/webhook_url",
-                  fix="Add token/webhook_url to your config notifications: section" if not has_creds else "")
-
-    click.echo("")
-    failures = [label for label, ok, _, __ in checks if not ok]
-    if not failures:
-        click.echo("  All checks passed.")
+    # 5. DB connectivity — just check env var presence
+    db_url = os.environ.get("JOSHUA_DB_URL", "").strip()
+    if db_url:
+        check("DB URL (JOSHUA_DB_URL)", True, "set")
     else:
-        click.echo(f"  {len(failures)} check(s) failed: {', '.join(failures)}")
-        sys.exit(1)
+        check("DB URL (JOSHUA_DB_URL)", True, "not set (optional)")
+
     click.echo("")
+    click.echo(f"  ✓ {passed} checks passed, ✗ {issues} issues found")
+    click.echo("")
+    if issues > 0:
+        sys.exit(1)
 
 
 @main.command()
@@ -366,7 +334,9 @@ def serve(host: str, port: int, cert_file: str, key_file: str):
 @main.command()
 @click.argument("name", default="")
 @click.option("--template", "-t", default="",
-              help="Start from a built-in example (e.g. python-api, nextjs, minimal)")
+              type=click.Choice(["nextjs", "django", "fastapi", "rails", "go", "rust", "generic",
+                                 "python-api", "minimal", ""], case_sensitive=False),
+              help="Project template (nextjs, django, fastapi, rails, go, rust, generic)")
 @click.option("--output", "-o", default="", help="Output YAML file path (default: <project-slug>.yaml)")
 @click.option("--from-repo", default="", help="GitHub/GitLab repo URL to detect project type")
 def init(name: str, output: str, template: str, from_repo: str):
@@ -470,23 +440,229 @@ sprint:
 
     # ── Template shortcut ─────────────────────────────────────────────
     if template:
+        project_name = name or "my-project"
+
+        # Built-in curated templates
+        _BUILTIN_TEMPLATES: dict[str, str] = {
+            "nextjs": f"""project:
+  name: {project_name}
+  path: .
+  deploy: npm run build
+
+sprint:
+  max_cycles: 5
+  max_hours: 2.0
+
+agents:
+  dev:
+    skill: software-engineer
+    instructions: >-
+      Review and improve the Next.js application. Focus on React best practices,
+      TypeScript types, and performance.
+    timeout: 300
+  bug-hunter:
+    skill: bug-hunter
+    instructions: >-
+      Find bugs in the Next.js app. Check for React hook violations, missing error
+      boundaries, and SSR issues.
+    timeout: 300
+  gate:
+    skill: quality-gate
+    instructions: >-
+      Evaluate changes. Run: npm run lint && npm run build && npm test -- --passWithNoTests
+    timeout: 120
+""",
+            "django": f"""project:
+  name: {project_name}
+  path: .
+
+sprint:
+  max_cycles: 5
+  max_hours: 2.0
+
+agents:
+  dev:
+    skill: software-engineer
+    instructions: >-
+      Review and improve the Django application. Follow Django best practices,
+      improve models, views, and ensure proper ORM usage.
+    timeout: 300
+  bug-hunter:
+    skill: bug-hunter
+    instructions: >-
+      Find bugs in the Django app. Check for N+1 queries, missing migrations,
+      security issues (CSRF, SQL injection), and test coverage.
+    timeout: 300
+  gate:
+    skill: quality-gate
+    instructions: >-
+      Evaluate changes. Run: python manage.py check && python -m pytest
+    timeout: 120
+""",
+            "fastapi": f"""project:
+  name: {project_name}
+  path: .
+
+sprint:
+  max_cycles: 5
+  max_hours: 2.0
+
+agents:
+  dev:
+    skill: software-engineer
+    instructions: >-
+      Review and improve the FastAPI application. Focus on Pydantic models,
+      async patterns, dependency injection, and OpenAPI documentation.
+    timeout: 300
+  bug-hunter:
+    skill: bug-hunter
+    instructions: >-
+      Find bugs in the FastAPI app. Check for missing error handlers, validation
+      issues, async correctness, and security concerns.
+    timeout: 300
+  gate:
+    skill: quality-gate
+    instructions: >-
+      Evaluate changes. Run: python -m pytest && python -m mypy .
+    timeout: 120
+""",
+            "rails": f"""project:
+  name: {project_name}
+  path: .
+
+sprint:
+  max_cycles: 5
+  max_hours: 2.0
+
+agents:
+  dev:
+    skill: software-engineer
+    instructions: >-
+      Review and improve the Ruby on Rails application. Follow Rails conventions,
+      improve models, controllers, and ensure proper ActiveRecord usage.
+    timeout: 300
+  bug-hunter:
+    skill: bug-hunter
+    instructions: >-
+      Find bugs in the Rails app. Check for N+1 queries, security issues,
+      missing validations, and test coverage.
+    timeout: 300
+  gate:
+    skill: quality-gate
+    instructions: >-
+      Evaluate changes. Run: bundle exec rails test && bundle exec rubocop
+    timeout: 120
+""",
+            "go": f"""project:
+  name: {project_name}
+  path: .
+
+sprint:
+  max_cycles: 5
+  max_hours: 2.0
+
+agents:
+  dev:
+    skill: software-engineer
+    instructions: >-
+      Review and improve the Go application. Follow Go idioms, improve error
+      handling, and ensure proper goroutine management.
+    timeout: 300
+  bug-hunter:
+    skill: bug-hunter
+    instructions: >-
+      Find bugs in the Go app. Check for goroutine leaks, race conditions,
+      nil pointer dereferences, and improper error handling.
+    timeout: 300
+  gate:
+    skill: quality-gate
+    instructions: >-
+      Evaluate changes. Run: go test ./... && go vet ./... && go build ./...
+    timeout: 120
+""",
+            "rust": f"""project:
+  name: {project_name}
+  path: .
+
+sprint:
+  max_cycles: 5
+  max_hours: 2.0
+
+agents:
+  dev:
+    skill: software-engineer
+    instructions: >-
+      Review and improve the Rust application. Focus on ownership patterns,
+      error handling with Result/Option, and idiomatic Rust.
+    timeout: 300
+  bug-hunter:
+    skill: bug-hunter
+    instructions: >-
+      Find bugs in the Rust app. Check for unsafe blocks, unwrap() calls that
+      could panic, and missing error propagation.
+    timeout: 300
+  gate:
+    skill: quality-gate
+    instructions: >-
+      Evaluate changes. Run: cargo test && cargo clippy -- -D warnings && cargo build
+    timeout: 120
+""",
+            "generic": f"""project:
+  name: {project_name}
+  path: .
+
+sprint:
+  max_cycles: 5
+  max_hours: 2.0
+
+agents:
+  dev:
+    skill: software-engineer
+    instructions: >-
+      Review and improve the codebase. Fix bugs, improve code quality, and
+      implement small enhancements based on best practices.
+    timeout: 300
+  gate:
+    skill: quality-gate
+    instructions: >-
+      Evaluate changes for correctness, security, and quality. Output a JSON
+      verdict with fields: verdict (GO/CAUTION/REVERT), findings, severity, confidence.
+    timeout: 120
+""",
+        }
+
+        # Check built-in templates first, then fall back to examples directory
+        if template in _BUILTIN_TEMPLATES:
+            yaml_content = _BUILTIN_TEMPLATES[template]
+            out_path = output or f"{template}.yaml"
+            dest = Path(out_path)
+            if dest.exists() and not click.confirm(f"{dest} already exists. Overwrite?", default=False):
+                return
+            dest.write_text(yaml_content)
+            click.echo(f"\n  Generated config from template '{template}' → {out_path}")
+            click.echo(f"  Edit project.path and runner settings, then:")
+            click.echo(f"    joshua doctor {out_path}")
+            click.echo(f"    joshua run {out_path}\n")
+            return
+
         examples_dir = Path(__file__).parent.parent / "examples"
         yamls = {f.stem: f for f in examples_dir.glob("*.yaml")}
-        if template not in yamls:
-            available = sorted(yamls.keys())
-            click.echo(f"Template '{template}' not found. Available: {', '.join(available)}")
-            sys.exit(1)
-        slug = template
-        out_path = output or f"{slug}.yaml"
-        dest = Path(out_path)
-        if dest.exists() and not click.confirm(f"{dest} already exists. Overwrite?", default=False):
+        if template in yamls:
+            slug = template
+            out_path = output or f"{slug}.yaml"
+            dest = Path(out_path)
+            if dest.exists() and not click.confirm(f"{dest} already exists. Overwrite?", default=False):
+                return
+            dest.write_text(yamls[template].read_text())
+            click.echo(f"\n  Copied template '{template}' → {out_path}")
+            click.echo(f"  Edit project.path and runner settings, then:")
+            click.echo(f"    joshua doctor {out_path}")
+            click.echo(f"    joshua run {out_path}\n")
             return
-        dest.write_text(yamls[template].read_text())
-        click.echo(f"\n  Copied template '{template}' → {out_path}")
-        click.echo(f"  Edit project.path and runner settings, then:")
-        click.echo(f"    joshua doctor {out_path}")
-        click.echo(f"    joshua run {out_path}\n")
-        return
+
+        available = sorted(set(list(_BUILTIN_TEMPLATES.keys()) + list(yamls.keys())))
+        click.echo(f"Template '{template}' not found. Available: {', '.join(available)}")
+        sys.exit(1)
 
     click.echo("")
     click.echo("  joshua-agent setup wizard")
@@ -2574,6 +2750,214 @@ def digest(config, since):
     click.echo(f"**Estimated cost:** ${total_cost:.4f} USD")
     if top_findings:
         click.echo(f"**Top recurring themes:** {', '.join(top_findings)}")
+    click.echo("")
+
+
+@main.command()
+@click.argument("config", type=click.Path(exists=True))
+@click.option("--interval", default=30, type=int, help="Poll interval in seconds (default: 30)")
+@click.option("--max-cycles", "-n", default=1, help="Max cycles per triggered run (default: 1)")
+@click.option("--branch", default="", help="Only trigger on changes to this branch")
+def watch(config: str, interval: int, max_cycles: int, branch: str):
+    """Watch for git commits and trigger a sprint on each new commit.
+
+    Polls git log every --interval seconds. Only runs when HEAD SHA changes.
+
+    \b
+    Example:
+      joshua watch my-project.yaml
+      joshua watch my-project.yaml --interval 60 --branch main
+    """
+    import signal as _signal
+    import subprocess as _subprocess
+    import time as _time
+
+    from joshua.config import load_config
+    from joshua.integrations.git import GitOps
+
+    cfg = load_config(config)
+    project_path = cfg["project"]["path"]
+    git = GitOps(project_path)
+
+    stop_flag = {"stop": False}
+
+    def _handle_signal(signum, frame):
+        click.echo("\njoshua watch: stopping (signal received)")
+        stop_flag["stop"] = True
+
+    _signal.signal(_signal.SIGINT, _handle_signal)
+    _signal.signal(_signal.SIGTERM, _handle_signal)
+
+    last_sha = git.get_head_sha()
+    click.echo(f"Watching {project_path} every {interval}s — HEAD={last_sha[:8] if last_sha else 'unknown'}")
+    if branch:
+        click.echo(f"  Filtering to branch: {branch}")
+    click.echo("  Press Ctrl+C to stop\n")
+
+    while not stop_flag["stop"]:
+        _time.sleep(interval)
+        if stop_flag["stop"]:
+            break
+
+        # Fetch from origin silently
+        try:
+            _subprocess.run(
+                ["git", "fetch", "origin"],
+                cwd=project_path,
+                capture_output=True,
+                timeout=30,
+            )
+        except Exception:
+            pass
+
+        # Check branch if filtered
+        if branch:
+            try:
+                result = _subprocess.run(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                    cwd=project_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                current_branch = result.stdout.strip()
+                if current_branch != branch:
+                    continue
+            except Exception:
+                pass
+
+        new_sha = git.get_head_sha()
+        if new_sha and new_sha != last_sha:
+            sha_short = new_sha[:8]
+            click.echo(f"New commit detected: {sha_short} — triggering sprint...")
+            last_sha = new_sha
+            try:
+                _subprocess.run(
+                    ["joshua", "run", config, "--max-cycles", str(max_cycles)],
+                    timeout=7200,
+                )
+            except Exception as e:
+                click.echo(f"  Sprint run error: {e}")
+
+
+@main.command()
+@click.argument("config", type=click.Path(exists=True))
+@click.option("--cycle", "-c", default=0, type=int, help="Cycle to explain (default: latest)")
+def explain(config: str, cycle: int):
+    """Ask the gate to explain a past verdict in plain language.
+
+    Reads the cycle's gate output and reformats it as a plain-English summary
+    suitable for non-technical stakeholders.
+
+    \b
+    Example:
+      joshua explain my-project.yaml
+      joshua explain my-project.yaml --cycle 3
+    """
+    import json as _json
+
+    from joshua.config import load_config
+
+    cfg = load_config(config)
+    project_path = cfg["project"]["path"]
+
+    state_dir = Path(cfg.get("memory", {}).get(
+        "state_dir",
+        Path(project_path).expanduser() / ".joshua"
+    ))
+    cycles_dir = state_dir / "cycles"
+
+    if not cycles_dir.exists():
+        click.echo("No cycles found. Run a sprint first.")
+        sys.exit(1)
+
+    # Find cycle number
+    if cycle == 0:
+        json_files = sorted(cycles_dir.glob("cycle-*.json"))
+        if not json_files:
+            click.echo("No cycle JSON files found.")
+            sys.exit(1)
+        cycle_file = json_files[-1]
+        cycle_num = int(cycle_file.stem.split("-")[1])
+    else:
+        cycle_num = cycle
+        cycle_file = cycles_dir / f"cycle-{cycle_num:04d}.json"
+        if not cycle_file.exists():
+            click.echo(f"Cycle {cycle_num} not found: {cycle_file}")
+            sys.exit(1)
+
+    # Read cycle JSON
+    cycle_data = _json.loads(cycle_file.read_text())
+
+    # Read checkpoint for verdict/confidence/findings
+    checkpoint_file = state_dir / "checkpoint.json"
+    checkpoint = {}
+    if checkpoint_file.exists():
+        try:
+            checkpoint = _json.loads(checkpoint_file.read_text())
+        except Exception:
+            pass
+
+    # Determine verdict, confidence, findings
+    verdict = checkpoint.get("last_verdict", cycle_data.get("verdict", "UNKNOWN"))
+    confidence_raw = checkpoint.get("last_gate_confidence", None)
+    if confidence_raw is not None:
+        conf_pct = int(float(confidence_raw) * 100) if float(confidence_raw) <= 1 else int(float(confidence_raw))
+    else:
+        conf_pct = 0
+    findings = checkpoint.get("last_gate_findings", "")
+
+    # Try to read gate agent output from cycle JSON
+    work_outputs = cycle_data.get("work_outputs", {})
+    gate_output = ""
+    for agent_name, output in work_outputs.items():
+        if "gate" in agent_name.lower():
+            gate_output = output
+            break
+    if not gate_output and work_outputs:
+        gate_output = list(work_outputs.values())[-1]
+
+    if not findings and gate_output:
+        findings = gate_output[:800]
+
+    # Try cycle markdown
+    md_file = cycles_dir / f"cycle-{cycle_num:04d}.md"
+    md_summary = ""
+    if md_file.exists():
+        try:
+            md_summary = md_file.read_text()[:400]
+        except Exception:
+            pass
+
+    # Bottom line
+    if verdict == "GO":
+        bottom_line = "All checks passed. The code is ready."
+    elif verdict == "CAUTION":
+        bottom_line = "Some concerns were found. Review before deploying."
+    else:
+        bottom_line = "Critical issues detected. The sprint reverted the changes."
+
+    click.echo(f"\n=== Cycle {cycle_num} Explanation ===\n")
+    click.echo(f"Verdict: {verdict}")
+    if conf_pct:
+        click.echo(f"Confidence: {conf_pct}%")
+    click.echo("")
+    click.echo("What happened:")
+    if findings:
+        for line in findings.strip().splitlines():
+            line = line.strip()
+            if line:
+                click.echo(f"  • {line}")
+    elif md_summary:
+        for line in md_summary.strip().splitlines():
+            line = line.strip()
+            if line:
+                click.echo(f"  • {line}")
+    else:
+        click.echo("  • No findings recorded for this cycle.")
+    click.echo("")
+    click.echo("Bottom line:")
+    click.echo(f"  {bottom_line}")
     click.echo("")
 
 

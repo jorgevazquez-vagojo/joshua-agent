@@ -1,0 +1,51 @@
+name: Joshua QA
+description: Run autonomous multi-agent QA sprints with joshua-agent
+author: Jorge Vazquez
+
+inputs:
+  config:
+    description: Path to sprint YAML config file
+    required: true
+  max-cycles:
+    description: Maximum sprint cycles (default 1 for CI)
+    required: false
+    default: '1'
+  github-token:
+    description: GitHub token for PR comments and commit status
+    required: false
+    default: ${{ github.token }}
+  anthropic-api-key:
+    description: Anthropic API key for Claude agents
+    required: false
+
+outputs:
+  verdict:
+    description: Sprint verdict (GO, CAUTION, or REVERT)
+    value: ${{ steps.run.outputs.verdict }}
+  confidence:
+    description: Gate confidence score (0-100)
+    value: ${{ steps.run.outputs.confidence }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install joshua-agent
+      shell: bash
+      run: pip install joshua-agent==${{ env.JOSHUA_VERSION || 'latest' }}
+
+    - name: Run sprint
+      id: run
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+      run: |
+        joshua run ${{ inputs.config }} --max-cycles ${{ inputs.max-cycles }}
+        VERDICT=$(cat .joshua/checkpoint.json | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('last_verdict','UNKNOWN'))")
+        CONFIDENCE=$(cat .joshua/checkpoint.json | python3 -c "import sys,json; d=json.load(sys.stdin); print(int(d.get('last_gate_confidence',0)*100))" 2>/dev/null || echo "0")
+        echo "verdict=$VERDICT" >> $GITHUB_OUTPUT
+        echo "confidence=$CONFIDENCE" >> $GITHUB_OUTPUT
+
+branding:
+  icon: shield
+  color: blue

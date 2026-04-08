@@ -25,6 +25,7 @@ from joshua.memory.lessons import extract_lessons, build_memory_prompt
 from joshua.memory.wiki import build_wiki_context, save_raw
 from joshua.integrations.git import GitOps
 from joshua.integrations.notifications import notifier_factory
+from joshua.integrations.notifiers import notify_all
 from joshua.integrations.trackers import tracker_factory
 from joshua.integrations.task_sources import task_source_factory
 from joshua.utils.health import check_health
@@ -470,6 +471,7 @@ class Sprint:
                 self._consecutive_health_failures = 0
 
         self._run_hooks("pre_cycle")
+        self._run_hooks("on_cycle_start")
 
         # Objective metric — baseline before work agents
         metric_before = self._run_metric()
@@ -697,6 +699,27 @@ class Sprint:
 
         self._write_cycle_markdown(self.cycle, verdict, cycle_duration, cycle_tokens, work_outputs)
         self._run_hooks("post_cycle", {"JOSHUA_VERDICT": verdict})
+        self._run_hooks("on_cycle_end", {"JOSHUA_VERDICT": verdict})
+
+        # Fire webhook notifiers (Slack/Discord/Teams) — never break the sprint
+        try:
+            current_branch = ""
+            try:
+                current_branch = GitOps(self.project_dir).current_branch() or ""
+            except Exception:
+                pass
+            notify_all(
+                self.config,
+                verdict=verdict,
+                project=self.project_name,
+                cycle=self.cycle,
+                confidence=self.last_gate_confidence if self.last_gate_confidence is not None else 0.0,
+                findings=self.last_gate_findings,
+                branch=current_branch,
+            )
+        except Exception as _notify_err:
+            log.warning(f"notify_all failed (non-fatal): {_notify_err}")
+
         return verdict
 
 

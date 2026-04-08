@@ -116,6 +116,10 @@ class NotificationsConfig(BaseModel):
     password: str = ""
     to: str = ""
     tls: bool = True
+    # Webhook notifier URLs (used by notifiers.py notify_all)
+    slack: str = ""
+    discord: str = ""
+    teams: str = ""
     model_config = {"extra": "allow"}
 
 
@@ -131,6 +135,15 @@ class TrackerConfig(BaseModel):
     model_config = {"extra": "allow"}  # tracker-specific fields (base_url, project_key, etc.)
 
 
+class HooksConfig(BaseModel):
+    on_go: str = ""           # shell command to run on GO verdict
+    on_caution: str = ""      # shell command to run on CAUTION verdict
+    on_revert: str = ""       # shell command to run on REVERT verdict
+    on_cycle_start: str = ""  # shell command before each cycle
+    on_cycle_end: str = ""    # shell command after each cycle
+    model_config = {"extra": "allow"}  # allow pre_run, post_deploy, etc.
+
+
 class JoshuaConfig(BaseModel):
     project: ProjectConfig
     runner: RunnerConfig = Field(default_factory=RunnerConfig)
@@ -140,6 +153,7 @@ class JoshuaConfig(BaseModel):
     notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
     preflight: PreflightConfig = Field(default_factory=PreflightConfig)
     tracker: TrackerConfig = Field(default_factory=TrackerConfig)
+    hooks: HooksConfig = Field(default_factory=HooksConfig)
 
     @field_validator("agents")
     @classmethod

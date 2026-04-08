@@ -2,6 +2,18 @@
 
 All notable changes to joshua-agent are documented here.
 
+## [1.7.0] — 2026-04-08
+
+### Added
+- **Notifier integration in sprint engine**: `notify_all()` from `notifiers.py` is called after each gate verdict, sending Slack/Discord/Teams webhook notifications. Config schema extended with `slack`, `discord`, `teams` URL fields on `NotificationsConfig`. Notification failures are caught and logged as warnings, never breaking the sprint.
+- **`joshua doctor` (enhanced)**: revamped with `✓`/`✗` output format. Now checks all 4 LLM agent binaries (`claude`, `aider`, `codex`, `openai`), env tokens (`GITHUB_TOKEN`, `GITLAB_TOKEN`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`), config validity, project path, git repo, and `JOSHUA_DB_URL`. Prints summary `✓ N checks passed, ✗ M issues found`.
+- **`joshua watch <config>`**: polls git every `--interval` seconds (default 30s) and triggers `joshua run` on each new commit. Supports `--branch` filter and `--max-cycles` per triggered run. Handles SIGINT/SIGTERM for clean exit.
+- **`joshua explain <config>`**: reads past cycle data and checkpoint to produce a plain-English summary suitable for non-technical stakeholders. Shows verdict, confidence %, bullet-point findings, and a one-line bottom line.
+- **GitHub Action `action.yml`**: composite action to install joshua-agent and run a sprint in CI. Outputs `verdict` and `confidence` as GitHub Actions step outputs. Usage: `uses: jorgevazquez-vagojo/joshua-agent@v1.7.0`.
+- **Sprint hooks config schema** (`HooksConfig`): `on_go`, `on_caution`, `on_revert`, `on_cycle_start`, `on_cycle_end` string fields for shell commands. Added to `JoshuaConfig`. Sprint now also runs `on_cycle_start` at cycle begin and `on_cycle_end` at cycle end.
+- **SSE streaming + verdicts endpoints** (server.py): `GET /sprints/{id}/logs/stream` and `GET /sprints/{id}/verdicts` were already present; fully implemented with real-time log tailing and results.tsv parsing.
+- **`joshua init --template`**: curated built-in templates for `nextjs`, `django`, `fastapi`, `rails`, `go`, `rust`, `generic` with appropriate agent instructions and gate commands. Falls back to `examples/*.yaml` for legacy templates.
+
 ## [1.6.0] — 2026-04-08
 
 ### Added

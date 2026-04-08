@@ -4,7 +4,7 @@
 
 | Signal | Status |
 | --- | --- |
-| Package | `1.6.0` |
+| Package | `1.7.0` |
 | Tests | `344 pytest tests`; CI runs on Python `3.11`, `3.12`, `3.13` |
 | Release path | GitHub Actions CI + PyPI publish workflow |
 
@@ -610,6 +610,16 @@ Add to your CI pipeline to run QA automatically before each release:
   with:
     name: qa-report
     path: qa-report.md
+```
+
+Or use the official Joshua GitHub Action for a zero-config sprint integration:
+
+```yaml
+# .github/workflows/qa.yml
+- uses: jorgevazquez-vagojo/joshua-agent@v1.7.0
+  with:
+    config: sprint.yaml
+    anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
 
 Or use `joshua fleet` with `parallel: true` if you want full sprint logs per environment in addition to the comparison summary.
