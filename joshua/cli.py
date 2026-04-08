@@ -85,6 +85,27 @@ def run(config: str, max_cycles: int, max_hours: float, dry_run: bool, no_deploy
     file_handler.setFormatter(fmt)
     log.addHandler(file_handler)
 
+    # Pre-flight checklist
+    import shutil as _shutil
+    click.echo("")
+    _checks = [
+        ("Config loaded", True, cfg["project"]["name"]),
+        ("Runner binary", bool(_shutil.which(
+            {"claude": "claude", "aider": "aider", "codex": "codex"}.get(
+                cfg.get("runner", {}).get("type", "claude"), "")
+            or "claude"
+        )), cfg.get("runner", {}).get("type", "claude")),
+        ("Project path", Path(cfg["project"]["path"]).expanduser().is_dir(),
+         cfg["project"]["path"]),
+    ]
+    for _label, _ok, _detail in _checks:
+        _icon = "✓" if _ok else "✗"
+        click.echo(f"  {_icon} {_label}: {_detail}")
+    if any(not _ok for _, _ok, _ in _checks):
+        click.echo("  Pre-flight failed — run `joshua doctor` for details")
+        sys.exit(1)
+    click.echo("")
+
     sprint = Sprint(cfg)
 
     # Graceful shutdown on SIGTERM (e.g., docker stop) and SIGINT (Ctrl+C)
@@ -154,15 +175,17 @@ def doctor(config: str | None):
     """
     import shutil
 
-    checks: list[tuple[str, bool, str]] = []  # (label, ok, detail)
+    checks: list[tuple[str, bool, str, str]] = []  # (label, ok, detail, fix)
 
-    def check(label: str, ok: bool, detail: str = ""):
-        checks.append((label, ok, detail))
+    def check(label: str, ok: bool, detail: str = "", fix: str = ""):
+        checks.append((label, ok, detail, fix))
         icon = "OK  " if ok else "FAIL"
         msg = f"  [{icon}] {label}"
         if detail:
             msg += f": {detail}"
         click.echo(msg)
+        if not ok and fix:
+            click.echo(f"         → {fix}")
 
     click.echo("")
     click.echo("  joshua doctor")
@@ -171,7 +194,8 @@ def doctor(config: str | None):
     # Python version
     major, minor = sys.version_info[:2]
     check("Python version", major == 3 and minor >= 10,
-          f"{major}.{minor} (need 3.10+)")
+          f"{major}.{minor} (need 3.10+)",
+          fix="Install Python 3.10+ from https://python.org or use pyenv")
 
     # Config validation
     cfg = None
@@ -181,7 +205,8 @@ def doctor(config: str | None):
             cfg = load_config(config)
             check("Config valid", True, cfg["project"]["name"])
         except Exception as e:
-            check("Config valid", False, str(e)[:120])
+            check("Config valid", False, str(e)[:120],
+                  fix=f"Fix the YAML error above, then re-run: joshua doctor {config}")
     else:
         check("Config (none provided)", True, "skip — pass a YAML file to validate")
 
@@ -193,7 +218,8 @@ def doctor(config: str | None):
         if binary:
             found = shutil.which(binary)
             check(f"Runner binary ({binary})", bool(found),
-                  found or "not found in PATH")
+                  found or "not found in PATH",
+                  fix=f"Install {binary}: see https://github.com/anthropics/claude-code" if binary == "claude" else f"pip install {binary}")
         else:
             check("Runner binary (custom)", True, "custom runner — skipping binary check")
     else:
@@ -209,7 +235,8 @@ def doctor(config: str | None):
 
     # git
     git_found = shutil.which("git")
-    check("git", bool(git_found), git_found or "not found in PATH")
+    check("git", bool(git_found), git_found or "not found in PATH",
+          fix="Install git: https://git-scm.com/downloads")
 
     # Project path
     if cfg:
@@ -224,9 +251,11 @@ def doctor(config: str | None):
             except OSError:
                 writable = False
             check("Project path", writable,
-                  str(project_path) + ("" if writable else " (not writable)"))
+                  str(project_path) + ("" if writable else " (not writable)"),
+                  fix=f"Fix permissions: chmod u+w {project_path}" if not writable else "")
         else:
-            check("Project path", False, f"does not exist: {project_path}")
+            check("Project path", False, f"does not exist: {project_path}",
+                  fix=f"Create it: mkdir -p {project_path}  or fix project.path in your config")
 
     # Notifications
     if cfg:
@@ -235,10 +264,11 @@ def doctor(config: str | None):
         if notif_type != "none":
             has_creds = bool(notif.get("token") or notif.get("webhook_url") or notif.get("url"))
             check(f"Notifications ({notif_type})", has_creds,
-                  "credentials present" if has_creds else "missing token/webhook_url")
+                  "credentials present" if has_creds else "missing token/webhook_url",
+                  fix="Add token/webhook_url to your config notifications: section" if not has_creds else "")
 
     click.echo("")
-    failures = [label for label, ok, _ in checks if not ok]
+    failures = [label for label, ok, _, __ in checks if not ok]
     if not failures:
         click.echo("  All checks passed.")
     else:
@@ -333,13 +363,37 @@ def serve(host: str, port: int, cert_file: str, key_file: str):
 
 
 @main.command()
+@click.option("--template", "-t", default="",
+              help="Start from a built-in example (e.g. python-api, nextjs, minimal)")
 @click.option("--output", "-o", default="", help="Output YAML file path (default: <project-slug>.yaml)")
-def init(output: str):
+def init(output: str, template: str):
     """Interactive setup wizard — generate a joshua config for your project.
 
     Example: joshua init
+             joshua init --template python-api
+             joshua init --template minimal --output my-project.yaml
     """
     import re
+
+    # ── Template shortcut ─────────────────────────────────────────────
+    if template:
+        examples_dir = Path(__file__).parent.parent / "examples"
+        yamls = {f.stem: f for f in examples_dir.glob("*.yaml")}
+        if template not in yamls:
+            available = sorted(yamls.keys())
+            click.echo(f"Template '{template}' not found. Available: {', '.join(available)}")
+            sys.exit(1)
+        slug = template
+        out_path = output or f"{slug}.yaml"
+        dest = Path(out_path)
+        if dest.exists() and not click.confirm(f"{dest} already exists. Overwrite?", default=False):
+            return
+        dest.write_text(yamls[template].read_text())
+        click.echo(f"\n  Copied template '{template}' → {out_path}")
+        click.echo(f"  Edit project.path and runner settings, then:")
+        click.echo(f"    joshua doctor {out_path}")
+        click.echo(f"    joshua run {out_path}\n")
+        return
 
     click.echo("")
     click.echo("  joshua-agent setup wizard")
@@ -959,6 +1013,250 @@ def distill(state_dirs: tuple, output: str, min_frequency: int):
     out_path = Path(output)
     out_path.write_text("\n".join(lines), encoding="utf-8")
     click.echo(f"Distilled {len(distilled)} lessons -> {output}")
+
+
+@main.command()
+@click.argument("name", required=False)
+@click.option("--show", "-s", is_flag=True, help="Print the config file contents instead of copying")
+def examples(name: str | None, show: bool):
+    """List or copy built-in example configs.
+
+    Example: joshua examples
+             joshua examples python-api
+             joshua examples python-api --show
+    """
+    examples_dir = Path(__file__).parent.parent / "examples"
+    yamls = sorted(f for f in examples_dir.glob("*.yaml"))
+
+    _descriptions = {
+        "minimal": "Bare-minimum single-agent sprint",
+        "python-api": "Python REST API — dev + qa + gate",
+        "nextjs": "Next.js app — dev + qa + gate",
+        "wordpress": "WordPress plugin — dev + security + gate",
+        "full-team": "Full team — dev + qa + bug-hunter + security + perf + gate",
+        "executive-team": "Executive review — PM + tech-writer + gate",
+        "legal-review": "Legal document review team",
+        "jira-vulcan": "Jira task source integration example",
+    }
+
+    if not name:
+        click.echo("")
+        click.echo("  Built-in examples:")
+        click.echo("  ──────────────────")
+        for f in yamls:
+            desc = _descriptions.get(f.stem, "")
+            suffix = f"  — {desc}" if desc else ""
+            click.echo(f"    {f.stem}{suffix}")
+        click.echo("")
+        click.echo("  Usage:")
+        click.echo("    joshua examples <name>           copy to current directory")
+        click.echo("    joshua examples <name> --show    print contents")
+        click.echo("    joshua init --template <name>    interactive setup from template")
+        click.echo("")
+        return
+
+    match = next((f for f in yamls if f.stem == name), None)
+    if not match:
+        click.echo(f"Example '{name}' not found. Run 'joshua examples' to list available.")
+        sys.exit(1)
+
+    if show:
+        click.echo(match.read_text())
+        return
+
+    dest = Path(f"{name}.yaml")
+    if dest.exists() and not click.confirm(f"{dest} already exists. Overwrite?", default=False):
+        return
+    dest.write_text(match.read_text())
+    click.echo(f"Copied to {dest}")
+    click.echo(f"Edit project.path, then: joshua doctor {dest}")
+
+
+@main.command()
+@click.option("--output", "-o", default="", help="Write to file instead of stdout")
+def schema(output: str):
+    """Export the JSON Schema for joshua config files (for IDE autocomplete).
+
+    Add to your YAML header:
+      # yaml-language-server: $schema=./joshua-schema.json
+
+    Example: joshua schema > joshua-schema.json
+             joshua schema --output joshua-schema.json
+    """
+    import json as _json
+    from joshua.config_schema import JoshuaConfig
+
+    schema_dict = JoshuaConfig.model_json_schema()
+    out = _json.dumps(schema_dict, indent=2)
+
+    if output:
+        Path(output).write_text(out)
+        click.echo(f"Schema written to {output}")
+        click.echo(f"Add to your YAML: # yaml-language-server: $schema=./{output}")
+    else:
+        click.echo(out)
+
+
+@main.command()
+@click.argument("config", type=click.Path(exists=True))
+def explain(config: str):
+    """Print a human-readable summary of what a config will do.
+
+    Example: joshua explain my-project.yaml
+    """
+    from joshua.config import load_config
+
+    try:
+        cfg = load_config(config)
+    except Exception as e:
+        click.echo(f"Config error: {e}")
+        sys.exit(1)
+
+    proj = cfg.get("project", {})
+    runner = cfg.get("runner", {})
+    agents_cfg = cfg.get("agents", {})
+    sprint = cfg.get("sprint", {})
+    notif = cfg.get("notifications", {})
+    memory = cfg.get("memory", {})
+    tracker = cfg.get("tracker", {})
+
+    agent_names = list(agents_cfg.keys())
+    work_agents = [n for n, a in agents_cfg.items() if a.get("skill", "") != "gate"]
+    gate_agents = [n for n, a in agents_cfg.items() if a.get("skill", "") == "gate"]
+
+    max_cycles = sprint.get("max_cycles", 0)
+    max_hours = sprint.get("max_hours", 0.0)
+    cycle_sleep = sprint.get("cycle_sleep", 300)
+    git_strategy = sprint.get("git_strategy", "none")
+    deploy = proj.get("deploy", "")
+    health_url = proj.get("health_url", "")
+    notif_type = notif.get("type", "none")
+    tracker_type = tracker.get("type", "none")
+    memory_enabled = memory.get("enabled", True)
+
+    # Rough cost estimate: assume ~4000 tokens output per agent per cycle
+    tokens_per_cycle = len(agent_names) * 4000
+    cycles_est = max_cycles if max_cycles else 10
+    cost_est = (tokens_per_cycle * cycles_est / 1_000_000) * 3.0  # $3/MTok Sonnet
+
+    click.echo("")
+    click.echo(f"  {proj.get('name', '?')}  ({config})")
+    click.echo(f"  {'─' * 50}")
+    click.echo(f"  Runner   : {runner.get('type', 'claude')} "
+               f"(timeout {runner.get('timeout', 1800)}s)")
+    click.echo(f"  Agents   : {' → '.join(agent_names)}")
+    if work_agents:
+        click.echo(f"             Work: {', '.join(work_agents)}")
+    if gate_agents:
+        click.echo(f"             Gate: {', '.join(gate_agents)}")
+    cycles_str = f"{max_cycles} cycles" if max_cycles else "unlimited cycles"
+    hours_str = f", {max_hours}h max" if max_hours else ""
+    click.echo(f"  Sprint   : {cycles_str}{hours_str}, sleep {cycle_sleep}s between cycles")
+    click.echo(f"  Git      : {git_strategy}")
+    if deploy:
+        click.echo(f"  Deploy   : {deploy}  (on GO verdict)")
+    if health_url:
+        click.echo(f"  Health   : {health_url}")
+    click.echo(f"  Tracker  : {tracker_type}")
+    click.echo(f"  Notify   : {notif_type}")
+    click.echo(f"  Memory   : {'enabled' if memory_enabled else 'disabled'}")
+    click.echo(f"  Est. cost: ~${cost_est:.2f} ({cycles_est} cycles, Sonnet pricing)")
+    if git_strategy == "snapshot":
+        click.echo(f"  ⚠  Snapshots: git commits will be created each cycle")
+    if deploy:
+        click.echo(f"  ⚠  Auto-deploy: GO verdict triggers: {deploy}")
+    click.echo("")
+
+
+@main.command()
+def tutorial():
+    """Walk through a simulated sprint — no LLM or API key needed.
+
+    Shows what a GO, CAUTION, and REVERT cycle look like in practice.
+
+    Example: joshua tutorial
+    """
+    import time as _time
+
+    click.echo("")
+    click.echo("  joshua tutorial — simulated sprint")
+    click.echo("  ───────────────────────────────────")
+    click.echo("  No API key needed. Press Enter to advance each step.")
+    click.echo("")
+    click.pause("  [Enter] Start →")
+
+    # Cycle 1 — GO
+    click.echo("")
+    click.echo("  ┌── Cycle 1 ─────────────────────────────────────────")
+    click.echo("  │  Work agent 'dev' running...")
+    _time.sleep(0.5)
+    click.echo("  │  Output: Fixed null-pointer in auth middleware.")
+    click.echo("  │          Added missing error handler for /api/login.")
+    click.echo("  │")
+    click.echo("  │  Gate agent reviewing changes...")
+    _time.sleep(0.5)
+    click.echo("  │  Gate verdict: GO ✓")
+    click.echo("  │  Confidence: 0.92 | Severity: low")
+    click.echo("  │  Findings: Changes are minimal and well-scoped.")
+    click.echo("  │            Tests pass. No regressions detected.")
+    click.echo("  └────────────────────────────────────────────────────")
+    click.echo("  → Deploy triggered. Sleeping 60s before next cycle.")
+    click.pause("\n  [Enter] Next cycle →")
+
+    # Cycle 2 — CAUTION
+    click.echo("")
+    click.echo("  ┌── Cycle 2 ─────────────────────────────────────────")
+    click.echo("  │  Work agent 'dev' running...")
+    _time.sleep(0.5)
+    click.echo("  │  Output: Refactored database connection pool.")
+    click.echo("  │          Changed default pool size from 10 to 50.")
+    click.echo("  │")
+    click.echo("  │  Gate agent reviewing changes...")
+    _time.sleep(0.5)
+    click.echo("  │  Gate verdict: CAUTION ⚠")
+    click.echo("  │  Confidence: 0.71 | Severity: medium")
+    click.echo("  │  Findings: Pool size increase may cause memory pressure")
+    click.echo("  │            under high load. No tests cover connection limits.")
+    click.echo("  └────────────────────────────────────────────────────")
+    click.echo("  → No deploy. Sprint continues but issues flagged for next cycle.")
+    click.pause("\n  [Enter] Next cycle →")
+
+    # Cycle 3 — REVERT
+    click.echo("")
+    click.echo("  ┌── Cycle 3 ─────────────────────────────────────────")
+    click.echo("  │  Work agent 'dev' running...")
+    _time.sleep(0.5)
+    click.echo("  │  Output: Replaced ORM with raw SQL for performance.")
+    click.echo("  │          Removed all model validations for speed.")
+    click.echo("  │")
+    click.echo("  │  Gate agent reviewing changes...")
+    _time.sleep(0.5)
+    click.echo("  │  Gate verdict: REVERT ✗")
+    click.echo("  │  Confidence: 0.97 | Severity: critical")
+    click.echo("  │  Findings: SQL injection risk introduced in 3 queries.")
+    click.echo("  │            Removing validations breaks API contract.")
+    click.echo("  │            This must not be deployed.")
+    click.echo("  └────────────────────────────────────────────────────")
+    click.echo("  → Git snapshot restored. Changes rolled back automatically.")
+    click.pause("\n  [Enter] Summary →")
+
+    click.echo("")
+    click.echo("  Sprint summary")
+    click.echo("  ─────────────")
+    click.echo("  Cycle 1: GO     — auth fix deployed")
+    click.echo("  Cycle 2: CAUTION — pool change flagged, not deployed")
+    click.echo("  Cycle 3: REVERT  — dangerous SQL changes rolled back")
+    click.echo("")
+    click.echo("  Key concepts:")
+    click.echo("  • GO      → changes are safe, deploy and continue")
+    click.echo("  • CAUTION → changes exist, issues flagged, sprint continues")
+    click.echo("  • REVERT  → dangerous changes, git snapshot restored")
+    click.echo("")
+    click.echo("  Next steps:")
+    click.echo("    joshua examples              — see real config templates")
+    click.echo("    joshua init                  — create your first config")
+    click.echo("    joshua init --template minimal — start from a template")
+    click.echo("")
 
 
 if __name__ == "__main__":

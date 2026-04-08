@@ -2,6 +2,17 @@
 
 All notable changes to joshua-agent are documented here.
 
+## [1.3.0] — 2026-04-08
+
+### Added
+- **`joshua examples`**: list all built-in example configs with descriptions. `joshua examples <name>` copies it to the current directory; `--show` prints the contents. Includes python-api, nextjs, wordpress, minimal, full-team, executive-team, legal-review.
+- **`joshua schema`**: export the Pydantic-generated JSON Schema for IDE YAML autocomplete. Output to stdout or `--output FILE`. Add `# yaml-language-server: $schema=./joshua-schema.json` to your config for VS Code inline validation.
+- **`joshua init --template <name>`**: skip the wizard and start from a built-in example. Copies the YAML and guides the user to edit `project.path` and run `joshua doctor`.
+- **`joshua explain config.yaml`**: human-readable summary of what a sprint will do — runner, agents (work vs gate), cycle limits, git strategy, deploy command, estimated cost in USD.
+- **`joshua tutorial`**: interactive simulated sprint walkthrough (no LLM or API key). Steps through GO, CAUTION, and REVERT cycles with realistic output to explain the verdict system.
+- **`joshua doctor` fix hints**: each `FAIL` check now prints a `→ <fix>` suggestion inline — e.g. `pip install claude-code`, `mkdir -p <path>`, `chmod u+w <path>`, install link for git.
+- **Pre-flight checklist in `joshua run`**: before the first cycle, prints a compact checklist (config loaded, runner binary found, project path exists). Exits with code 1 and points to `joshua doctor` if any check fails.
+
 ## [1.2.0] — 2026-04-08
 
 ### Added
