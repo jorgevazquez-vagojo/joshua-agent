@@ -2274,13 +2274,16 @@ def schedule(config: str, cron: str, interval: int, max_cycles: int, dry_run: bo
 @click.option("--token", envvar="GITHUB_TOKEN", default="", help="API token (or set GITHUB_TOKEN / GITLAB_TOKEN)")
 @click.option("--no-checkout", is_flag=True, help="Skip git checkout (use current branch)")
 @click.option("--dry-run", is_flag=True, help="Show what would be posted without posting")
-def pr(url, config, token, no_checkout, dry_run):
+@click.option("--auto-fix", is_flag=True, help="On CAUTION, run dev agent to fix issues and push")
+@click.option("--fix-branch", default="", help="Branch name for the fix (default: {branch}-joshua-fix)")
+def pr(url, config, token, no_checkout, dry_run, auto_fix, fix_branch):
     """Run Joshua QA on a GitHub PR or GitLab MR and post a comment.
 
     \b
     Examples:
       joshua pr https://github.com/owner/repo/pull/123 sprint.yaml
       joshua pr https://gitlab.com/group/project/-/merge_requests/456 sprint.yaml --dry-run
+      joshua pr https://github.com/owner/repo/pull/123 sprint.yaml --auto-fix
     """
     import json as _json
     import os as _os
@@ -2493,6 +2496,432 @@ def pr(url, config, token, no_checkout, dry_run):
             sc.post(last_verdict, f"Joshua QA: {last_verdict}")
     except Exception as e:
         click.echo(f"Warning: Failed to post commit status: {e}", err=True)
+
+    # ── Auto-fix on CAUTION ───────────────────────────────────────────
+    if auto_fix and last_verdict == "CAUTION" and project_dir and not dry_run:
+        original_branch = branch or "main"
+        resolved_fix_branch = fix_branch or f"{original_branch}-joshua-fix"
+        click.echo(f"\nAuto-fix triggered (verdict: CAUTION). Creating branch: {resolved_fix_branch}")
+        try:
+            _subprocess.run(
+                ["git", "checkout", "-b", resolved_fix_branch],
+                cwd=project_dir, check=True, capture_output=True,
+            )
+
+            # Run dev-only sprint (1 cycle, only agents whose name contains "dev" or "engineer")
+            import copy as _copy
+            fix_cfg = _copy.deepcopy(cfg)
+            fix_cfg["sprint"]["max_cycles"] = 1
+            all_agents = fix_cfg.get("agents", {})
+            dev_agents = {
+                k: v for k, v in all_agents.items()
+                if "dev" in k.lower() or "engineer" in k.lower()
+            }
+            if dev_agents:
+                fix_cfg["agents"] = dev_agents
+
+            # Write findings to fix_context.txt so agents can pick it up
+            if last_findings:
+                fix_context_dir = Path(project_dir) / ".joshua"
+                fix_context_dir.mkdir(parents=True, exist_ok=True)
+                (fix_context_dir / "fix_context.txt").write_text(
+                    f"Fix the following issues found by QA:\n\n{last_findings}\n"
+                )
+
+            fix_sprint = Sprint(fix_cfg)
+            fix_sprint.run()
+
+            # Verify with gate-only sprint
+            gate_cfg = _copy.deepcopy(cfg)
+            gate_cfg["sprint"]["max_cycles"] = 1
+            all_agents = gate_cfg.get("agents", {})
+            gate_agents_only = {
+                k: v for k, v in all_agents.items()
+                if "gate" in k.lower()
+            }
+            if gate_agents_only:
+                gate_cfg["agents"] = gate_agents_only
+
+            verify_sprint = Sprint(gate_cfg)
+            verify_sprint.run()
+
+            # Read new verdict
+            new_verdict = "CAUTION"
+            if checkpoint_path.exists():
+                try:
+                    new_cp = _json.loads(checkpoint_path.read_text())
+                    new_verdict = new_cp.get("last_verdict", "CAUTION")
+                    if new_verdict not in ("GO", "CAUTION", "REVERT"):
+                        new_verdict = "CAUTION"
+                except Exception:
+                    pass
+
+            # Commit and push the fix branch
+            _subprocess.run(
+                ["git", "add", "-A"], cwd=project_dir, check=False, capture_output=True
+            )
+            _subprocess.run(
+                ["git", "commit", "-m", "fix: auto-fix by joshua — resolved QA findings"],
+                cwd=project_dir, check=False, capture_output=True,
+            )
+            _subprocess.run(
+                ["git", "push", "origin", resolved_fix_branch],
+                cwd=project_dir, check=False, capture_output=True,
+            )
+
+            # Post follow-up comment
+            if new_verdict == "GO":
+                fix_comment = (
+                    f"🔧 Auto-fix applied on branch `{resolved_fix_branch}`. "
+                    f"New verdict: ✅ GO"
+                )
+            else:
+                fix_comment = (
+                    f"🔧 Auto-fix attempted on `{resolved_fix_branch}` but verdict "
+                    f"remains {new_verdict}. Manual review needed."
+                )
+
+            click.echo(fix_comment)
+            fix_comment_body = _json.dumps({"body": fix_comment}).encode()
+            try:
+                if platform == "github":
+                    fix_req = _urlrequest.Request(
+                        f"https://api.github.com/repos/{owner}/{repo}/issues/{pr_number}/comments",
+                        data=fix_comment_body,
+                        headers={
+                            "Authorization": f"Bearer {token}" if token else "",
+                            "Accept": "application/vnd.github+json",
+                            "Content-Type": "application/json",
+                        },
+                    )
+                    _urlrequest.urlopen(fix_req, timeout=15)
+            except Exception as e:
+                click.echo(f"Warning: Failed to post auto-fix comment: {e}", err=True)
+
+        except Exception as e:
+            click.echo(f"Warning: Auto-fix failed: {e}", err=True)
+        finally:
+            # Always restore original branch
+            try:
+                _subprocess.run(
+                    ["git", "checkout", original_branch],
+                    cwd=project_dir, check=False, capture_output=True,
+                )
+            except Exception:
+                pass
+
+
+@main.command()
+@click.argument("config", type=click.Path(exists=True))
+@click.option("--good", default="", help="Known-good git ref (default: auto-detect from checkpoint)")
+@click.option("--bad", default="HEAD", help="Known-bad git ref (default: HEAD)")
+@click.option("--max-steps", default=10, type=int, help="Max bisect steps (default: 10)")
+@click.option("--dry-run", is_flag=True, help="Show the commit list without running sprints")
+def bisect(config, good, bad, max_steps, dry_run):
+    """Binary-search git history to find which commit introduced a QA failure.
+
+    Checks out commits between --good and --bad, runs a 1-cycle sprint at each
+    midpoint, and narrows down to the first failing commit.
+
+    \b
+    Example:
+      joshua bisect my-project.yaml --good v1.2.0 --bad HEAD
+      joshua bisect my-project.yaml --good abc1234 --bad def5678
+    """
+    import json as _json
+    import subprocess as _subprocess
+    from joshua.config import load_config
+    from joshua.sprint import Sprint
+
+    def _git(args, cwd):
+        result = _subprocess.run(["git"] + args, cwd=cwd, capture_output=True, text=True)
+        return result.stdout.strip(), result.returncode
+
+    cfg = load_config(config)
+    project_dir = cfg.get("project", {}).get("path", "")
+    if not project_dir:
+        click.echo("Error: project.path not set in config.", err=True)
+        sys.exit(1)
+
+    project_dir = str(Path(project_dir).expanduser().resolve())
+
+    # Detect original branch for restore
+    original_branch, rc = _git(["rev-parse", "--abbrev-ref", "HEAD"], project_dir)
+    if rc != 0 or not original_branch:
+        original_branch = "main"
+
+    # Auto-detect good from checkpoint if not provided
+    if not good:
+        state_dir = Path(project_dir) / ".joshua"
+        cp_path = state_dir / "checkpoint.json"
+        if cp_path.exists():
+            try:
+                cp = _json.loads(cp_path.read_text())
+                good = cp.get("last_good_sha", "")
+            except Exception:
+                pass
+        if not good:
+            click.echo("Error: --good ref is required (or set last_good_sha in checkpoint.json).", err=True)
+            sys.exit(1)
+
+    # Get commit list between good and bad
+    log_out, rc = _git(["log", "--oneline", "--no-merges", f"{good}..{bad}"], project_dir)
+    if rc != 0:
+        click.echo(f"Error running git log: {log_out}", err=True)
+        sys.exit(1)
+
+    commits = []
+    for line in log_out.splitlines():
+        line = line.strip()
+        if line:
+            parts = line.split(" ", 1)
+            sha = parts[0]
+            msg = parts[1] if len(parts) > 1 else ""
+            commits.append((sha, msg))
+
+    if len(commits) < 2:
+        click.echo("Nothing to bisect (fewer than 2 commits between --good and --bad).")
+        return
+
+    click.echo(f"Bisecting {len(commits)} commits between {good[:8]} and {bad[:8] if bad != 'HEAD' else 'HEAD'}")
+
+    if dry_run:
+        click.echo("\nCommit list (newest first):")
+        for sha, msg in commits:
+            click.echo(f"  {sha[:8]}  {msg[:70]}")
+        return
+
+    # Binary search — commits are newest-first from git log
+    # commits[0] = bad side, commits[-1] = good side
+    lo = 0
+    hi = len(commits) - 1
+    first_bad = commits[0]
+
+    import logging as _logging
+    _logging.basicConfig(level=_logging.WARNING)
+
+    state_dir_path = Path(project_dir) / ".joshua"
+    checkpoint_path = state_dir_path / "checkpoint.json"
+
+    try:
+        for step in range(1, max_steps + 1):
+            if lo > hi:
+                break
+            mid = (lo + hi) // 2
+            mid_sha, mid_msg = commits[mid]
+
+            # Checkout midpoint commit
+            _, rc = _git(["checkout", mid_sha], project_dir)
+            if rc != 0:
+                click.echo(f"Warning: git checkout {mid_sha} failed — skipping", err=True)
+                break
+
+            # Run 1-cycle sprint
+            import copy as _copy
+            run_cfg = _copy.deepcopy(cfg)
+            run_cfg.setdefault("sprint", {})["max_cycles"] = 1
+            sprint = Sprint(run_cfg)
+            sprint.run()
+
+            # Read verdict from checkpoint
+            verdict = "CAUTION"
+            if checkpoint_path.exists():
+                try:
+                    cp = _json.loads(checkpoint_path.read_text())
+                    verdict = cp.get("last_verdict", "CAUTION")
+                    if verdict not in ("GO", "CAUTION", "REVERT"):
+                        verdict = "CAUTION"
+                except Exception:
+                    pass
+
+            click.echo(f"[step {step}/{max_steps}] Checking {mid_sha[:8]}: {mid_msg[:50]} → {verdict}")
+
+            if verdict == "GO":
+                # Good commit — bad is in the upper half (lower indices)
+                first_bad = commits[mid - 1] if mid > 0 else commits[mid]
+                hi = mid - 1
+            else:
+                # Bad commit — bad might be even earlier, or this is the first bad
+                first_bad = commits[mid]
+                lo = mid + 1
+
+    finally:
+        # Always restore original branch
+        _git(["checkout", original_branch], project_dir)
+        click.echo(f"\nRestored branch: {original_branch}")
+
+    click.echo(f"\n=== Bisect Result ===")
+    click.echo(f"First bad commit: {first_bad[0]} — {first_bad[1]}")
+
+
+@main.command()
+@click.argument("config_a", type=click.Path(exists=True))
+@click.argument("config_b", type=click.Path(exists=True))
+@click.option("--cycles", "-n", default=3, type=int, help="Cycles to run per config (default: 3)")
+@click.option("--label-a", default="", help="Label for config A (default: filename)")
+@click.option("--label-b", default="", help="Label for config B (default: filename)")
+@click.option("--output", "-o", default="", help="Save results to JSON file")
+def bench(config_a, config_b, cycles, label_a, label_b, output):
+    """A/B benchmark two sprint configs — compare verdict quality, cost, and speed.
+
+    Runs N cycles with each config and produces a side-by-side comparison.
+
+    \b
+    Example:
+      joshua bench config-claude.yaml config-gpt4.yaml --cycles 5
+      joshua bench baseline.yaml experimental.yaml -n 3 --output bench-results.json
+    """
+    import csv as _csv
+    import io as _io
+    import json as _json
+    import logging as _logging
+    from joshua.config import load_config
+    from joshua.sprint import Sprint
+
+    _logging.basicConfig(level=_logging.WARNING)
+
+    label_a = label_a or Path(config_a).stem
+    label_b = label_b or Path(config_b).stem
+
+    def _run_config(config_path: str, n_cycles: int):
+        """Run sprint for n_cycles and return collected stats."""
+        cfg = load_config(config_path)
+        project_dir = cfg.get("project", {}).get("path", "")
+        cfg.setdefault("sprint", {})["max_cycles"] = n_cycles
+
+        sprint = Sprint(cfg)
+        sprint.run()
+
+        state_dir = Path(
+            cfg.get("memory", {}).get("state_dir", "")
+            or (project_dir and str(Path(project_dir) / ".joshua"))
+            or ".joshua"
+        )
+        checkpoint_path = state_dir / "checkpoint.json"
+        tsv_path = state_dir / "results.tsv"
+
+        # Read per-cycle data from results.tsv
+        per_cycle = []
+        if tsv_path.exists():
+            try:
+                content = tsv_path.read_text(encoding="utf-8", errors="replace")
+                reader = _csv.DictReader(_io.StringIO(content), delimiter="\t")
+                rows = list(reader)
+                # Take last n_cycles rows
+                for row in rows[-n_cycles:]:
+                    verdict = row.get("verdict", "CAUTION").upper()
+                    try:
+                        duration = float(row.get("duration_s", 0) or 0)
+                    except ValueError:
+                        duration = 0.0
+                    try:
+                        confidence = float(row.get("confidence", 0) or 0)
+                    except ValueError:
+                        confidence = 0.0
+                    per_cycle.append({
+                        "verdict": verdict,
+                        "duration_s": duration,
+                        "confidence": confidence,
+                    })
+            except Exception:
+                pass
+
+        # Read totals from checkpoint
+        total_cost = 0.0
+        total_tokens = 0
+        if checkpoint_path.exists():
+            try:
+                cp = _json.loads(checkpoint_path.read_text())
+                total_cost = cp.get("cost_usd", 0.0)
+                total_tokens = cp.get("total_tokens", 0)
+            except Exception:
+                pass
+
+        return {
+            "per_cycle": per_cycle,
+            "total_cost": total_cost,
+            "total_tokens": total_tokens,
+        }
+
+    click.echo(f"Running {cycles} cycles with config A: {label_a}...")
+    result_a = _run_config(config_a, cycles)
+    click.echo(f"Running {cycles} cycles with config B: {label_b}...")
+    result_b = _run_config(config_b, cycles)
+
+    def _stats(result, n_cycles):
+        pc = result["per_cycle"]
+        go = sum(1 for r in pc if r["verdict"] == "GO")
+        caution = sum(1 for r in pc if r["verdict"] == "CAUTION")
+        revert = sum(1 for r in pc if r["verdict"] == "REVERT")
+        actual = len(pc) or 1
+        avg_conf = sum(r["confidence"] for r in pc) / actual if pc else 0.0
+        avg_dur = sum(r["duration_s"] for r in pc) / actual if pc else 0.0
+        go_rate = go / actual
+        return {
+            "cycles_run": len(pc),
+            "go": go,
+            "caution": caution,
+            "revert": revert,
+            "go_rate": go_rate,
+            "avg_confidence": avg_conf,
+            "avg_duration": avg_dur,
+            "total_cost": result["total_cost"],
+            "total_tokens": result["total_tokens"],
+        }
+
+    sa = _stats(result_a, cycles)
+    sb = _stats(result_b, cycles)
+
+    # Winner logic
+    if sa["go_rate"] > sb["go_rate"]:
+        winner = f"← A ({label_a} — higher GO rate)"
+    elif sb["go_rate"] > sa["go_rate"]:
+        winner = f"→ B ({label_b} — higher GO rate)"
+    elif sa["avg_confidence"] > sb["avg_confidence"]:
+        winner = f"← A ({label_a} — higher confidence)"
+    elif sb["avg_confidence"] > sa["avg_confidence"]:
+        winner = f"→ B ({label_b} — higher confidence)"
+    elif sa["total_cost"] < sb["total_cost"]:
+        winner = f"← A ({label_a} — lower cost)"
+    elif sb["total_cost"] < sa["total_cost"]:
+        winner = f"→ B ({label_b} — lower cost)"
+    else:
+        winner = "tie"
+
+    # Print comparison table
+    col_w = max(len(label_a), len(label_b), 14) + 2
+    sep = "─" * (20 + col_w * 2)
+
+    click.echo(f"\n=== Benchmark Results ===\n")
+    click.echo(f"{'':20}{label_a:>{col_w}}{label_b:>{col_w}}")
+    click.echo(sep)
+    click.echo(f"{'Cycles run':20}{sa['cycles_run']:>{col_w}}{sb['cycles_run']:>{col_w}}")
+    click.echo(f"{'GO verdicts':20}{sa['go']:>{col_w}}{sb['go']:>{col_w}}")
+    click.echo(f"{'CAUTION verdicts':20}{sa['caution']:>{col_w}}{sb['caution']:>{col_w}}")
+    click.echo(f"{'REVERT verdicts':20}{sa['revert']:>{col_w}}{sb['revert']:>{col_w}}")
+    click.echo(f"{'Avg confidence':20}{int(sa['avg_confidence'] * 100):>{col_w - 1}}%{int(sb['avg_confidence'] * 100):>{col_w - 1}}%")
+    _dur_a = f"{sa['avg_duration']:.0f}s"
+    _dur_b = f"{sb['avg_duration']:.0f}s"
+    click.echo(f"{'Avg duration':20}{_dur_a:>{col_w}}{_dur_b:>{col_w}}")
+    _cost_a = f"${sa['total_cost']:.4f}"
+    _cost_b = f"${sb['total_cost']:.4f}"
+    click.echo(f"{'Total cost':20}{_cost_a:>{col_w}}{_cost_b:>{col_w}}")
+    click.echo(sep)
+    click.echo(f"{'Winner':20}{winner}")
+
+    if output:
+        bench_result = {
+            "label_a": label_a,
+            "label_b": label_b,
+            "cycles_requested": cycles,
+            "stats_a": sa,
+            "stats_b": sb,
+            "per_cycle_a": result_a["per_cycle"],
+            "per_cycle_b": result_b["per_cycle"],
+            "winner": winner,
+        }
+        Path(output).write_text(_json.dumps(bench_result, indent=2))
+        click.echo(f"\nResults written to: {output}")
 
 
 @main.command()

@@ -2,6 +2,13 @@
 
 All notable changes to joshua-agent are documented here.
 
+## [1.8.0] — 2026-04-08
+
+### Added
+- **`joshua bisect <config>`**: binary-search git history to find the commit that introduced a QA failure. Uses `git log --oneline --no-merges` to enumerate commits between `--good` and `--bad`, checks out each midpoint, runs a 1-cycle sprint, and narrows down to the first failing commit. Supports `--dry-run` to inspect the commit list without running sprints. Always restores the original branch via try/finally.
+- **`joshua bench <config_a> <config_b>`**: A/B benchmark two sprint configs. Runs `--cycles N` (default: 3) with each config, reads per-cycle verdict/duration/confidence from `results.tsv` and total cost from `checkpoint.json`, then prints a side-by-side comparison table. Winner determined by GO rate, then confidence, then cost. Optional `--output` saves full JSON results with per-cycle breakdown.
+- **`joshua pr --auto-fix`**: on CAUTION verdict, automatically creates a `{branch}-joshua-fix` branch (or `--fix-branch`), runs a dev-only sprint to address QA findings, then verifies with a gate-only sprint. If the new verdict is GO, commits and pushes the fix branch and posts a follow-up comment. If still CAUTION/REVERT, pushes the branch for human review and posts an informational comment. REVERT verdicts are not auto-fixed (require human attention). Original branch is always restored via try/finally.
+
 ## [1.7.0] — 2026-04-08
 
 ### Added
