@@ -84,6 +84,7 @@ class Sprint:
         self.min_memory_gb = sprint_conf.get("min_memory_gb", 0)  # wait for RAM before agent
         self.trigger = sprint_conf.get("trigger", "continuous")  # continuous | event | on_demand
         self.poll_interval = sprint_conf.get("poll_interval", 300)
+        self.parallel_agents = sprint_conf.get("parallel_agents", False)
 
         # Memory settings
         mem_conf = config.get("memory", {})
@@ -454,19 +455,18 @@ class Sprint:
         context = self._build_context()
 
         # Phase 1: Run all work skills
-        work_outputs = {}
+        work_outputs: dict = {}
         cycle_tokens = 0
-        for i, agent in enumerate(work_agents):
-            # Stagger: wait between agents (skip before first)
-            if i > 0:
+        _tokens_lock = threading.Lock()
+
+        def _run_work_agent(agent, i: int) -> None:
+            if i > 0 and not self.parallel_agents:
                 self._stagger_wait(agent.name)
             task = agent.get_task(self.cycle)
             self.sprint_logger.info(f"[{agent.name}] ({agent.skill}) Task: {task[:80]}")
             result = self._run_agent_with_retry(agent, task, context)
-            cycle_tokens += result.tokens_out
-            output = result.output if result.success else f"[FAILED] {result.error}"
 
-            # Protected file check — warn and override verdict if violated
+            output = result.output if result.success else f"[FAILED] {result.error}"
             violations = self._check_protected_files(agent.name)
             if violations:
                 output += (
@@ -474,16 +474,36 @@ class Sprint:
                     f"{violations}. These changes will be flagged for gate review."
                 )
 
-            work_outputs[agent.name] = output
+            with _tokens_lock:
+                nonlocal cycle_tokens
+                cycle_tokens += result.tokens_out
+                work_outputs[agent.name] = output
+
             self._record_result(agent, task, result)
 
-            # Token budget: stop running more work agents if limit exceeded
-            if self.max_tokens_per_cycle and cycle_tokens > self.max_tokens_per_cycle:
-                self.sprint_logger.warning(
-                    f"Token budget exceeded: {cycle_tokens} > {self.max_tokens_per_cycle} "
-                    f"— skipping remaining work agents"
-                )
-                break
+        if self.parallel_agents and len(work_agents) > 1:
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=len(work_agents)
+            ) as executor:
+                futs = [
+                    executor.submit(_run_work_agent, agent, i)
+                    for i, agent in enumerate(work_agents)
+                ]
+                concurrent.futures.wait(futs)
+                # Re-raise any exception from a worker
+                for fut in futs:
+                    fut.result()
+        else:
+            for i, agent in enumerate(work_agents):
+                _run_work_agent(agent, i)
+                # Token budget: stop running more work agents if limit exceeded
+                if self.max_tokens_per_cycle and cycle_tokens > self.max_tokens_per_cycle:
+                    self.sprint_logger.warning(
+                        f"Token budget exceeded: {cycle_tokens} > {self.max_tokens_per_cycle} "
+                        f"— skipping remaining work agents"
+                    )
+                    break
 
         # Objective metric — after work agents
         metric_after = self._run_metric()

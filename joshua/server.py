@@ -49,6 +49,7 @@ AUTO_RESTART = os.environ.get("JOSHUA_AUTO_RESTART", "0") == "1"
 _db: SprintDB | None = None
 _pm: ProcessManager | None = None
 _supervisor: Supervisor | None = None
+_server_start: float = time.time()
 
 
 # ── Auth ───────────────────────────────────────────────────────────────
@@ -250,6 +251,34 @@ def _status_from_db(row: dict, pm: ProcessManager | None = None) -> SprintStatus
 
 
 # ── Routes ─────────────────────────────────────────────────────────────
+
+@app.get("/")
+def overview():
+    """Server overview — version, uptime, running sprints (no auth required)."""
+    running_list = []
+    total = 0
+    running = 0
+    if _db:
+        rows = _db.list_sprints()
+        total = len(rows)
+        for row in rows:
+            if row["status"] == "running":
+                running += 1
+                running_list.append({
+                    "sprint_id": row["sprint_id"],
+                    "project": row["project"],
+                    "cycle": row["cycle"],
+                    "started_at": row["started_at"],
+                })
+    return {
+        "name": "joshua-agent",
+        "version": __version__,
+        "uptime_s": round(time.time() - _server_start, 1),
+        "sprints_total": total,
+        "sprints_running": running,
+        "running": running_list,
+    }
+
 
 @app.get("/health")
 def health():

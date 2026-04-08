@@ -225,6 +225,66 @@ class FilesystemTracker(Tracker):
             p.rename(p.with_name(p.name.replace(".wip", ".failed")))
 
 
+class LinearTracker(Tracker):
+    """Linear issue tracker via GraphQL API."""
+
+    API_URL = "https://api.linear.app/graphql"
+
+    def __init__(self, config: dict):
+        self.api_key = config.get("api_key", "")
+        self.team_id = config.get("team_id", "")
+
+    def _request(self, query: str, variables: dict) -> dict:
+        payload = json.dumps({"query": query, "variables": variables}).encode()
+        req = urllib.request.Request(self.API_URL, data=payload, headers={
+            "Content-Type": "application/json",
+            "Authorization": self.api_key,
+        })
+        resp = urllib.request.urlopen(req, timeout=15)
+        return json.loads(resp.read())
+
+    def create_issue(self, summary: str, description: str, **kwargs) -> str | None:
+        if not self.api_key or not self.team_id:
+            log.warning("LinearTracker: api_key or team_id missing")
+            return None
+
+        query = """
+        mutation IssueCreate($input: IssueCreateInput!) {
+            issueCreate(input: $input) {
+                success
+                issue { id identifier url }
+            }
+        }
+        """
+        variables = {"input": {
+            "title": summary[:255],
+            "description": description[:10000],
+            "teamId": self.team_id,
+        }}
+        try:
+            data = self._request(query, variables)
+            issue = data.get("data", {}).get("issueCreate", {}).get("issue", {})
+            log.info(f"Linear issue created: {issue.get('identifier')} {issue.get('url')}")
+            return issue.get("id", "")
+        except Exception as e:
+            log.warning(f"Linear create failed: {e}")
+            return None
+
+    def add_comment(self, issue_id: str, text: str):
+        if not self.api_key:
+            return
+        query = """
+        mutation CommentCreate($input: CommentCreateInput!) {
+            commentCreate(input: $input) { success }
+        }
+        """
+        variables = {"input": {"issueId": issue_id, "body": text[:10000]}}
+        try:
+            self._request(query, variables)
+        except Exception as e:
+            log.warning(f"Linear comment failed: {e}")
+
+
 class NullTracker(Tracker):
     """No-op tracker."""
 
@@ -246,5 +306,7 @@ def tracker_factory(config: dict) -> Tracker:
         return GitHubTracker(tracker_config)
     elif tracker_type == "filesystem":
         return FilesystemTracker(tracker_config)
+    elif tracker_type == "linear":
+        return LinearTracker(tracker_config)
     else:
         return NullTracker()

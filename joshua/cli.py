@@ -102,12 +102,16 @@ def run(config: str, max_cycles: int, max_hours: float, dry_run: bool, no_deploy
 @click.argument("state_dir", type=click.Path(), default=".joshua")
 @click.option("--watch", "-w", is_flag=True, help="Refresh dashboard continuously (Ctrl+C to stop)")
 @click.option("--interval", "-i", default=5, help="Refresh interval in seconds (default: 5, requires --watch)")
-def status(state_dir: str, watch: bool, interval: int):
+@click.option("--json", "as_json", is_flag=True, help="Output machine-readable JSON (for CI integration)")
+@click.option("--no-color", "no_color", is_flag=True, envvar="NO_COLOR", help="Disable ANSI colors")
+def status(state_dir: str, watch: bool, interval: int, as_json: bool, no_color: bool):
     """Show sprint status dashboard.
 
     Example: joshua status .joshua
              joshua status --watch --interval 3
+             joshua status --json | jq .checkpoint.cycle
     """
+    import json as _json
     import time as _time
     from joshua.utils.status import get_status, format_status
 
@@ -116,6 +120,11 @@ def status(state_dir: str, watch: bool, interval: int):
         click.echo(f"State directory not found: {state_path}")
         click.echo("Run a sprint first, or specify the correct path.")
         sys.exit(1)
+
+    if as_json:
+        st = get_status(state_path)
+        click.echo(_json.dumps(st, indent=2))
+        return
 
     if not watch:
         st = get_status(state_path)
@@ -131,6 +140,111 @@ def status(state_dir: str, watch: bool, interval: int):
             _time.sleep(interval)
     except KeyboardInterrupt:
         pass
+
+
+@main.command()
+@click.argument("config", type=click.Path(exists=True), required=False)
+def doctor(config: str | None):
+    """Pre-flight diagnostic: check environment before first run.
+
+    Validates the runner binary, git, project path, and config (if provided).
+
+    Example: joshua doctor
+             joshua doctor my-project.yaml
+    """
+    import shutil
+
+    checks: list[tuple[str, bool, str]] = []  # (label, ok, detail)
+
+    def check(label: str, ok: bool, detail: str = ""):
+        checks.append((label, ok, detail))
+        icon = "OK  " if ok else "FAIL"
+        msg = f"  [{icon}] {label}"
+        if detail:
+            msg += f": {detail}"
+        click.echo(msg)
+
+    click.echo("")
+    click.echo("  joshua doctor")
+    click.echo("  ─────────────")
+
+    # Python version
+    major, minor = sys.version_info[:2]
+    check("Python version", major == 3 and minor >= 10,
+          f"{major}.{minor} (need 3.10+)")
+
+    # Config validation
+    cfg = None
+    if config:
+        try:
+            from joshua.config import load_config
+            cfg = load_config(config)
+            check("Config valid", True, cfg["project"]["name"])
+        except Exception as e:
+            check("Config valid", False, str(e)[:120])
+    else:
+        check("Config (none provided)", True, "skip — pass a YAML file to validate")
+
+    # Runner binary
+    if cfg:
+        runner_type = cfg.get("runner", {}).get("type", "claude")
+        binary_map = {"claude": "claude", "aider": "aider", "codex": "codex"}
+        binary = binary_map.get(runner_type, "")
+        if binary:
+            found = shutil.which(binary)
+            check(f"Runner binary ({binary})", bool(found),
+                  found or "not found in PATH")
+        else:
+            check("Runner binary (custom)", True, "custom runner — skipping binary check")
+    else:
+        # Check common runners
+        for bin_name in ("claude", "aider", "codex"):
+            found = shutil.which(bin_name)
+            if found:
+                check(f"Runner binary ({bin_name})", True, found)
+                break
+        else:
+            check("Runner binary", False,
+                  "none of claude/aider/codex found in PATH")
+
+    # git
+    git_found = shutil.which("git")
+    check("git", bool(git_found), git_found or "not found in PATH")
+
+    # Project path
+    if cfg:
+        project_path = Path(cfg["project"]["path"])
+        exists = project_path.is_dir()
+        if exists:
+            try:
+                test_file = project_path / ".joshua_doctor_test"
+                test_file.touch()
+                test_file.unlink()
+                writable = True
+            except OSError:
+                writable = False
+            check("Project path", writable,
+                  str(project_path) + ("" if writable else " (not writable)"))
+        else:
+            check("Project path", False, f"does not exist: {project_path}")
+
+    # Notifications
+    if cfg:
+        notif = cfg.get("notifications", {})
+        notif_type = notif.get("type", "none")
+        if notif_type != "none":
+            has_creds = bool(notif.get("token") or notif.get("webhook_url") or notif.get("url"))
+            check(f"Notifications ({notif_type})", has_creds,
+                  "credentials present" if has_creds else "missing token/webhook_url")
+
+    click.echo("")
+    failures = [label for label, ok, _ in checks if not ok]
+    if not failures:
+        click.echo("  All checks passed.")
+    else:
+        click.echo(f"  {len(failures)} check(s) failed: {', '.join(failures)}")
+        sys.exit(1)
+    click.echo("")
 
 
 @main.command()
@@ -475,6 +589,131 @@ def replay(config: str, cycle: int, state_dir: str):
     click.echo(f"Confidence: {sprint.last_gate_confidence}")
     if sprint.last_gate_findings:
         click.echo(f"\nFindings:\n{sprint.last_gate_findings[:1000]}")
+
+
+@main.command()
+@click.argument("state_dir", type=click.Path(), default=".joshua")
+@click.option("--format", "-f", "fmt", type=click.Choice(["markdown", "json"]),
+              default="markdown", help="Output format (default: markdown)")
+@click.option("--output", "-o", default="", help="Output file (default: stdout)")
+@click.option("--cycles", "-n", default=0, type=int,
+              help="Include last N cycles only (default: all)")
+def export(state_dir: str, fmt: str, output: str, cycles: int):
+    """Export sprint report as Markdown or JSON.
+
+    Reads results.tsv and per-cycle summaries from the state directory.
+
+    Example: joshua export .joshua > report.md
+             joshua export .joshua --format json --output report.json
+             joshua export .joshua --cycles 5 --format markdown
+    """
+    import csv
+    import json as _json
+
+    state_path = Path(state_dir).expanduser().resolve()
+    if not state_path.exists():
+        click.echo(f"State directory not found: {state_path}")
+        sys.exit(1)
+
+    # Load cycle records from results.tsv
+    tsv_path = state_path / "results.tsv"
+    records: list[dict] = []
+    if tsv_path.exists():
+        import io
+        content = tsv_path.read_text(encoding="utf-8", errors="replace")
+        reader = csv.DictReader(io.StringIO(content), delimiter="\t")
+        for row in reader:
+            records.append(dict(row))
+
+    if cycles:
+        records = records[-cycles:]
+
+    # Aggregate stats
+    total = len(records)
+    verdicts: dict[str, int] = {}
+    durations: list[float] = []
+    for r in records:
+        v = r.get("verdict", "").upper()
+        verdicts[v] = verdicts.get(v, 0) + 1
+        try:
+            durations.append(float(r.get("duration_s", 0) or 0))
+        except ValueError:
+            pass
+    avg_dur = round(sum(durations) / len(durations), 1) if durations else 0
+
+    # Load per-cycle markdown summaries
+    cycle_summaries: list[str] = []
+    cycles_dir = state_path / "cycles"
+    if cycles_dir.is_dir():
+        md_files = sorted(cycles_dir.glob("cycle-*.md"))
+        if cycles:
+            md_files = md_files[-cycles:]
+        for f in md_files:
+            cycle_summaries.append(f.read_text(encoding="utf-8", errors="replace"))
+
+    # Checkpoint for project name
+    cp_path = state_path / "checkpoint.json"
+    project_name = "unknown"
+    if cp_path.exists():
+        try:
+            cp = _json.loads(cp_path.read_text())
+            project_name = cp.get("project", "unknown")
+        except Exception:
+            pass
+
+    if fmt == "json":
+        report = {
+            "project": project_name,
+            "exported_at": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
+            "cycles_included": total,
+            "verdicts": verdicts,
+            "avg_duration_s": avg_dur,
+            "records": records,
+        }
+        result = _json.dumps(report, indent=2)
+    else:
+        from datetime import datetime as _dt
+        lines = [
+            f"# Sprint Report — {project_name}",
+            f"",
+            f"_Exported: {_dt.now().strftime('%Y-%m-%d %H:%M')}_",
+            f"",
+            f"## Summary",
+            f"",
+            f"| Metric | Value |",
+            f"|--------|-------|",
+            f"| Cycles | {total} |",
+        ]
+        for v, count in sorted(verdicts.items()):
+            lines.append(f"| {v} | {count} |")
+        lines += [
+            f"| Avg duration | {avg_dur}s |",
+            f"",
+        ]
+        if cycle_summaries:
+            lines.append("## Cycle Summaries")
+            lines.append("")
+            lines.extend(cycle_summaries)
+        elif records:
+            lines.append("## Cycles")
+            lines.append("")
+            for r in records:
+                cycle_n = r.get("cycle", "?")
+                verdict = r.get("verdict", "?")
+                dur = r.get("duration_s", "?")
+                desc = r.get("description", "")
+                lines.append(f"### Cycle {cycle_n} — {verdict} ({dur}s)")
+                if desc:
+                    lines.append(f"")
+                    lines.append(desc)
+                lines.append("")
+        result = "\n".join(lines)
+
+    if output:
+        Path(output).write_text(result, encoding="utf-8")
+        click.echo(f"Report written to: {output}")
+    else:
+        click.echo(result)
 
 
 if __name__ == "__main__":

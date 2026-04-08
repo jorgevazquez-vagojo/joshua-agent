@@ -2,6 +2,29 @@
 
 All notable changes to joshua-agent are documented here.
 
+## [1.1.0] — 2026-04-08
+
+### Added
+- **Discord notifier** (`notifications.type: discord`): sends sprint events to a Discord channel via incoming webhook. SSRF-validated, circuit breaker, mirrors Slack feature parity.
+- **Linear tracker** (`tracker.type: linear`): creates and comments on Linear issues via GraphQL API. Requires `api_key` + `team_id`.
+- **`joshua export`**: export sprint report as Markdown or JSON. Reads `results.tsv` and per-cycle `.md` summaries. Options: `--format markdown|json`, `--output FILE`, `--cycles N` (last N cycles).
+- **Parallel work agents** (`sprint.parallel_agents: true`): work agents run concurrently in a `ThreadPoolExecutor`. Gate agents remain strictly sequential. Token accumulation is thread-safe via `threading.Lock`.
+
+### Changed
+- `TrackerConfig.type` now includes `"linear"` in the allowed literal.
+- `SprintConfig` gains `parallel_agents: bool = False`.
+
+## [1.0.0] — 2026-04-08
+
+### Added
+- **`joshua doctor`**: pre-flight diagnostic CLI command. Checks Python version (≥3.10), config validity (if YAML provided), runner binary in PATH, git availability, project path existence + writability, and notification credentials. Exits with code 1 if any check fails — safe to use as a CI gate.
+- **`joshua status --json`** (`-j`/`--json`): outputs machine-readable JSON for CI pipelines (`joshua status --json | jq .checkpoint.cycle`).
+- **`NO_COLOR` / `--no-color`** support on `joshua status`: respects the standard `NO_COLOR` env var and `--no-color` flag for pipe-safe output.
+- **`GET /`** overview endpoint: public (no auth) endpoint returning `name`, `version`, `uptime_s`, `sprints_total`, `sprints_running`, and a list of active sprints. Useful for `curl` health checks without the `X-Internal-Token`.
+
+### Changed
+- `Development Status` classifier upgraded from `4 - Beta` to `5 - Production/Stable`.
+
 ## [0.9.0] — 2026-04-08
 
 ### Added

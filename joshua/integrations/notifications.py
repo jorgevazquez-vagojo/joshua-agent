@@ -180,6 +180,37 @@ class WebhookNotifier(Notifier):
         urllib.request.urlopen(req, timeout=10)
 
 
+class DiscordNotifier(Notifier):
+    """Send notifications via Discord Incoming Webhook."""
+
+    def __init__(self, config: dict):
+        super().__init__()
+        self.webhook_url = config.get("webhook_url", "")
+        self._failures_before_disable = config.get("failures_before_disable",
+                                                    DEFAULT_FAILURES_BEFORE_DISABLE)
+        if not self.webhook_url:
+            log.warning("Discord: webhook_url missing, notifications disabled")
+            self._disabled = True
+        elif not self._disabled:
+            try:
+                validate_url(self.webhook_url, require_https=True)
+            except ValueError as e:
+                log.warning(f"Discord webhook_url rejected (SSRF protection): {e}")
+                self._disabled = True
+
+    def _redact_error(self, error: str) -> str:
+        if self.webhook_url:
+            error = error.replace(self.webhook_url, "[REDACTED URL]")
+        return error
+
+    def _send(self, text: str, agent_name: str = "", silent: bool = False):
+        content = f"**{agent_name}**: {text}" if agent_name else text
+        payload = json.dumps({"content": content[:2000]}).encode()
+        req = urllib.request.Request(self.webhook_url, data=payload,
+                                     headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=10)
+
+
 class NullNotifier(Notifier):
     """No-op notifier (notifications disabled)."""
 
@@ -196,6 +227,8 @@ def notifier_factory(config: dict) -> Notifier:
         return TelegramNotifier(notif_config)
     elif notif_type == "slack":
         return SlackNotifier(notif_config)
+    elif notif_type == "discord":
+        return DiscordNotifier(notif_config)
     elif notif_type == "webhook":
         return WebhookNotifier(notif_config)
     else:

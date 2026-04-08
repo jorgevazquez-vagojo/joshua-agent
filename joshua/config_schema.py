@@ -79,6 +79,7 @@ class SprintConfig(BaseModel):
     git_strategy: Literal["none", "snapshot", "hillclimb"] = "none"
     trigger: Literal["continuous", "event", "on_demand"] = "continuous"
     poll_interval: int = Field(default=300, ge=30)  # seconds between polls in event mode
+    parallel_agents: bool = False  # run work agents concurrently (gate remains sequential)
 
     @field_validator("recovery_deploy", mode="before")
     @classmethod
@@ -113,7 +114,7 @@ class PreflightConfig(BaseModel):
 
 
 class TrackerConfig(BaseModel):
-    type: Literal["none", "jira", "github", "filesystem"] = "none"
+    type: Literal["none", "jira", "github", "filesystem", "linear"] = "none"
     model_config = {"extra": "allow"}  # tracker-specific fields (base_url, project_key, etc.)
 
 
