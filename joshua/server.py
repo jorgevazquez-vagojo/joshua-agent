@@ -810,6 +810,237 @@ def get_sprint_report(sprint_id: str):
     }
 
 
+@app.get("/sprints/{sprint_id}/trace", dependencies=[Depends(verify_token)])
+def get_trace(sprint_id: str, cycle: int | None = None):
+    """Return trace JSON for a cycle. If cycle omitted, returns latest."""
+    import json as _json
+    from joshua.utils.tracer import CycleTracer
+
+    row = _db.get_sprint(sprint_id) if _db else None
+    if not row:
+        raise HTTPException(404, f"Sprint {sprint_id} not found")
+
+    config = row.get("config") or {}
+    project_path = config.get("project", {}).get("path", "")
+    state_dir_override = config.get("memory", {}).get("state_dir", "")
+    project_dir = Path(state_dir_override).parent if state_dir_override else Path(project_path)
+
+    cycles = CycleTracer.list_cycles(project_dir)
+    if not cycles:
+        raise HTTPException(404, f"No traces found for sprint {sprint_id}")
+
+    target_cycle = cycle if cycle is not None else cycles[-1]
+    data = CycleTracer.load(project_dir, target_cycle)
+    if data is None:
+        raise HTTPException(404, f"No trace for sprint {sprint_id} cycle {target_cycle}")
+    return data
+
+
+@app.get("/sprints/{sprint_id}/trace/list", dependencies=[Depends(verify_token)])
+def list_traces(sprint_id: str):
+    """Return list of available trace cycles with summary."""
+    from joshua.utils.tracer import CycleTracer
+
+    row = _db.get_sprint(sprint_id) if _db else None
+    if not row:
+        raise HTTPException(404, f"Sprint {sprint_id} not found")
+
+    config = row.get("config") or {}
+    project_path = config.get("project", {}).get("path", "")
+    state_dir_override = config.get("memory", {}).get("state_dir", "")
+    project_dir = Path(state_dir_override).parent if state_dir_override else Path(project_path)
+
+    cycles = CycleTracer.list_cycles(project_dir)
+    result = []
+    for c in cycles:
+        data = CycleTracer.load(project_dir, c)
+        if not data:
+            continue
+        meta = data.get("metadata") or {}
+
+        def _sum_tokens(node):
+            return (node.get("tokens_out") or 0) + sum(
+                _sum_tokens(ch) for ch in (node.get("children") or [])
+            )
+
+        result.append({
+            "cycle": c,
+            "verdict": meta.get("verdict", ""),
+            "confidence": meta.get("confidence", None),
+            "duration_ms": data.get("duration_ms", 0),
+            "tokens_total": _sum_tokens(data),
+            "agents": [
+                ch.get("name") for ch in (data.get("children") or [])
+                if ch.get("type") in ("agent", "gate")
+            ],
+        })
+    return result
+
+
+@app.get("/ui/trace/{sprint_id}/{cycle}", include_in_schema=False)
+def ui_trace(sprint_id: str, cycle: int, request: Request):
+    """Serve the trace viewer HTML page."""
+    html = """<!DOCTYPE html>
+<html>
+<head>
+  <title>Joshua Trace — SPRINT_ID cycle CYCLE_NUM</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    body { font-family: monospace; background: #0d1117; color: #e6edf3; margin: 0; }
+    .node circle { fill: #21262d; stroke: #30363d; stroke-width: 1.5px; cursor: pointer; }
+    .node.done circle { stroke: #3fb950; }
+    .node.error circle { stroke: #f85149; }
+    .node.caution circle { stroke: #d29922; }
+    .node.GO circle { stroke: #3fb950; }
+    .node.CAUTION circle { stroke: #d29922; }
+    .node.REVERT circle { stroke: #f85149; }
+    .node text { font-size: 12px; fill: #e6edf3; }
+    .link { fill: none; stroke: #30363d; stroke-width: 1px; }
+    .tooltip { position: absolute; background: #161b22; border: 1px solid #30363d;
+               border-radius: 6px; padding: 12px; font-size: 12px; pointer-events: none;
+               max-width: 400px; }
+    .header { padding: 16px 24px; border-bottom: 1px solid #30363d; display: flex; gap: 16px; align-items: center; }
+    .badge { padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+    .badge.GO { background: #1a4731; color: #3fb950; }
+    .badge.CAUTION { background: #341a00; color: #d29922; }
+    .badge.REVERT { background: #3d0a0a; color: #f85149; }
+    #svg-container { width: 100vw; height: calc(100vh - 60px); overflow: hidden; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <a href="/ui" style="color:#58a6ff;text-decoration:none">&larr; Dashboard</a>
+    <strong>SPRINT_ID</strong>
+    <span>Cycle CYCLE_NUM</span>
+    <span id="verdict-badge" class="badge"></span>
+    <span id="duration" style="color:#8b949e"></span>
+    <span id="tokens-total" style="color:#8b949e"></span>
+  </div>
+  <div id="svg-container"></div>
+  <div id="tooltip" class="tooltip" style="display:none"></div>
+
+  <script>
+    fetch('/sprints/SPRINT_ID/trace?cycle=CYCLE_NUM')
+      .then(r => r.json())
+      .then(data => renderTree(data))
+      .catch(e => document.getElementById('svg-container').innerHTML =
+        '<p style="color:#f85149;padding:2rem">Failed to load trace: ' + e + '</p>');
+
+    function renderTree(data) {
+      const verdict = (data.metadata && data.metadata.verdict) || '';
+      const badge = document.getElementById('verdict-badge');
+      badge.textContent = verdict;
+      badge.className = 'badge ' + verdict;
+      const durS = ((data.duration_ms || 0) / 1000).toFixed(1);
+      document.getElementById('duration').textContent = durS + 's';
+
+      function sumTokens(node) {
+        return (node.tokens_out || 0) + (node.children || []).reduce((a, c) => a + sumTokens(c), 0);
+      }
+      const totalTokens = sumTokens(data);
+      document.getElementById('tokens-total').textContent =
+        Math.round(totalTokens / 1000) + 'k tokens';
+
+      const width = window.innerWidth;
+      const height = window.innerHeight - 60;
+
+      const svg = d3.select('#svg-container')
+        .append('svg')
+        .attr('width', width)
+        .attr('height', height)
+        .call(d3.zoom().on('zoom', (e) => g.attr('transform', e.transform)));
+
+      const g = svg.append('g').attr('transform', 'translate(80, 40)');
+      const treeLayout = d3.tree().size([height - 80, width - 200]);
+      const root = d3.hierarchy(data, d => d.children);
+      root.x0 = height / 2;
+      root.y0 = 0;
+
+      root.descendants().forEach(d => {
+        if (d.depth > 1) { d._children = d.children; d.children = null; }
+      });
+
+      let nodeId = 0;
+
+      function update(source) {
+        const treeData = treeLayout(root);
+        const nodes = treeData.descendants();
+        const links = treeData.links();
+        nodes.forEach(d => d.y = d.depth * 220);
+
+        const node = g.selectAll('.node').data(nodes, d => d.id || (d.id = ++nodeId));
+
+        const nodeEnter = node.enter().append('g')
+          .attr('class', d => {
+            const s = d.data.status || '';
+            const v = (d.data.metadata && d.data.metadata.verdict) || '';
+            return 'node ' + (v || s);
+          })
+          .attr('transform', () => `translate(${source.y0},${source.x0})`)
+          .on('click', (e, d) => {
+            if (d.children) { d._children = d.children; d.children = null; }
+            else { d.children = d._children; d._children = null; }
+            update(d);
+          })
+          .on('mouseover', (e, d) => showTooltip(e, d.data))
+          .on('mouseout', () => { document.getElementById('tooltip').style.display = 'none'; });
+
+        nodeEnter.append('circle').attr('r', 6);
+        nodeEnter.append('text')
+          .attr('dy', '0.31em')
+          .attr('x', d => (d.children || d._children) ? -10 : 10)
+          .attr('text-anchor', d => (d.children || d._children) ? 'end' : 'start')
+          .text(d => {
+            const n = d.data;
+            let label = n.name || '';
+            if (n.duration_ms) label += ' (' + (n.duration_ms / 1000).toFixed(1) + 's)';
+            if (n.tokens_out) label += ' · ' + Math.round(n.tokens_out / 100) / 10 + 'k';
+            if (n.metadata && n.metadata.verdict) label += ' → ' + n.metadata.verdict;
+            return label;
+          });
+
+        nodeEnter.merge(node).transition().duration(250)
+          .attr('transform', d => `translate(${d.y},${d.x})`);
+
+        node.exit().transition().duration(250)
+          .attr('transform', () => `translate(${source.y},${source.x})`).remove();
+
+        const link = g.selectAll('.link').data(links, d => d.target.id);
+        link.enter().insert('path', 'g').attr('class', 'link')
+          .attr('d', d3.linkHorizontal().x(() => source.y0).y(() => source.x0))
+          .merge(link).transition().duration(250)
+          .attr('d', d3.linkHorizontal().x(d => d.y).y(d => d.x));
+        link.exit().transition().duration(250)
+          .attr('d', d3.linkHorizontal().x(() => source.y).y(() => source.x)).remove();
+
+        nodes.forEach(d => { d.x0 = d.x; d.y0 = d.y; });
+      }
+
+      function showTooltip(e, n) {
+        let html = '<strong>' + (n.name || '') + '</strong> <span style="color:#8b949e">' + (n.type || '') + '</span><br>';
+        html += 'Status: ' + (n.status || '') + '<br>';
+        if (n.duration_ms) html += 'Duration: ' + (n.duration_ms / 1000).toFixed(2) + 's<br>';
+        if (n.tokens_out) html += 'Tokens out: ' + n.tokens_out + '<br>';
+        if (n.input_preview) html += '<br><strong>Input:</strong><br><span style="color:#8b949e">' + n.input_preview + '</span><br>';
+        if (n.output_preview) html += '<br><strong>Output:</strong><br><span style="color:#8b949e">' + n.output_preview + '</span>';
+        if (n.metadata && n.metadata.verdict)
+          html += '<br><strong>Verdict:</strong> ' + n.metadata.verdict +
+            ' (' + Math.round((n.metadata.confidence || 0) * 100) + '%)';
+        const tooltip = document.getElementById('tooltip');
+        tooltip.innerHTML = html;
+        tooltip.style.display = 'block';
+        tooltip.style.left = (e.pageX + 12) + 'px';
+        tooltip.style.top = (e.pageY - 28) + 'px';
+      }
+
+      update(root);
+    }
+  </script>
+</body>
+</html>""".replace("SPRINT_ID", sprint_id).replace("CYCLE_NUM", str(cycle))
+    return HTMLResponse(html)
+
+
 @app.get("/audit", dependencies=[Depends(verify_token)])
 def get_audit_log(lines: int = Query(default=100, ge=1, le=5000)):
     """Return last N lines of the audit log (max 5000)."""

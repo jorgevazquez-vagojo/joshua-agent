@@ -4,8 +4,8 @@
 
 | Signal | Status |
 | --- | --- |
-| Package | `1.14.0` |
-| Tests | `353 pytest tests`; CI runs on Python `3.11`, `3.12`, `3.13` |
+| Package | `1.15.0` |
+| Tests | `362 pytest tests`; CI runs on Python `3.11`, `3.12`, `3.13` |
 | Release path | GitHub Actions CI + PyPI publish workflow |
 
 ## Demo
@@ -409,6 +409,23 @@ joshua status .joshua --json            # Machine-readable JSON (for CI: | jq .c
 joshua logs .joshua                     # Print last 50 log lines
 joshua logs .joshua --follow            # Live tail (like tail -f)
 ```
+
+### Trace Viewer
+
+Every cycle generates `.joshua/traces/cycle-N.json` — a structured tree of the full execution: orchestrator → agents → tool calls → gate → verdict.
+
+```bash
+joshua trace show .                       # ASCII tree of latest cycle
+joshua trace show . --cycle 3             # Specific cycle
+joshua trace show . --format json         # Raw JSON (pipe to jq)
+joshua trace show . --format flat         # Flat indented list
+joshua trace list .                       # Table: cycle | verdict | duration | agents | tokens
+```
+
+The HTTP server also exposes:
+- `GET /sprints/{id}/trace` — trace JSON for latest (or `?cycle=N`) cycle
+- `GET /sprints/{id}/trace/list` — list of all available cycles
+- `GET /ui/trace/{sprint_id}/{cycle}` — interactive D3.js tree viewer in browser
 
 ### Analysis & export
 

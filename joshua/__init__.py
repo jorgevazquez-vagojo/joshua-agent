@@ -4,4 +4,4 @@ try:
     from importlib.metadata import version as _version
     __version__ = _version("joshua-agent")
 except Exception:
-    __version__ = "1.14.0"
+    __version__ = "1.15.0"

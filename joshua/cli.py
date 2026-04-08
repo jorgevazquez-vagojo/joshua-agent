@@ -4550,6 +4550,180 @@ def completion(shell):
     click.echo("")
 
 
+# ── joshua trace ───────────────────────────────────────────────────────────
+
+def _status_icon(status: str, verdict: str = "") -> str:
+    """Return a text icon for a node status/verdict."""
+    v = (verdict or status or "").upper()
+    if v == "GO" or status == "done":
+        return "[OK]"
+    if v in ("CAUTION",):
+        return "[!] "
+    if v in ("REVERT", "error", "killed"):
+        return "[X] "
+    return "    "
+
+
+def _render_trace_tree(trace: dict, use_color: bool = False) -> str:
+    """Render a trace dict as an ASCII tree string."""
+    GREEN = "\033[92m" if use_color else ""
+    YELLOW = "\033[93m" if use_color else ""
+    RED = "\033[91m" if use_color else ""
+    GRAY = "\033[90m" if use_color else ""
+    RESET = "\033[0m" if use_color else ""
+
+    def color_for(node: dict) -> str:
+        verdict = (node.get("metadata") or {}).get("verdict", "")
+        status = node.get("status", "")
+        if verdict == "GO" or status == "done":
+            return GREEN
+        if verdict == "CAUTION":
+            return YELLOW
+        if verdict in ("REVERT", "error", "killed") or status in ("error", "killed"):
+            return RED
+        return ""
+
+    def fmt_node(node: dict) -> str:
+        name = node.get("name", "?")
+        node_type = node.get("type", "")
+        status = node.get("status", "")
+        dur_ms = node.get("duration_ms", 0)
+        tokens = node.get("tokens_out", 0)
+        meta = node.get("metadata") or {}
+        verdict = meta.get("verdict", "")
+        confidence = meta.get("confidence", None)
+        effort = meta.get("effort_score", None)
+
+        col = color_for(node)
+        parts = [f"{col}{name}{RESET}"]
+        if verdict:
+            parts.append(f"-> {verdict}")
+            if confidence is not None:
+                parts.append(f"({int(confidence * 100)}%)")
+        if dur_ms:
+            parts.append(f"{GRAY}{dur_ms // 1000}s{RESET}")
+        if tokens:
+            parts.append(f"{GRAY}tokens:{tokens}{RESET}")
+        if effort:
+            parts.append(f"effort:{effort}/5")
+        # input/output preview
+        inp = node.get("input_preview", "")
+        out = node.get("output_preview", "")
+        if node_type == "tool_call" and inp:
+            parts.append(f"<- {repr(inp[:60])}")
+        if node_type == "tool_call" and out:
+            parts.append(f"-> {repr(out[:60])}")
+        return " | ".join(parts)
+
+    lines = []
+
+    def walk(node: dict, prefix: str, is_last: bool) -> None:
+        connector = "└── " if is_last else "├── "
+        child_prefix = prefix + ("    " if is_last else "│   ")
+        lines.append(prefix + connector + fmt_node(node))
+        children = node.get("children") or []
+        for i, child in enumerate(children):
+            walk(child, child_prefix, i == len(children) - 1)
+
+    # Root node header
+    name = trace.get("name", "Cycle")
+    meta = trace.get("metadata") or {}
+    verdict = meta.get("verdict", "")
+    dur_ms = trace.get("duration_ms", 0)
+    col = color_for(trace)
+    header = f"{col}{name}{RESET}"
+    if verdict:
+        header += f"  verdict={verdict}"
+    if dur_ms:
+        header += f"  ({dur_ms // 1000}s)"
+    lines.append(header)
+    lines.append("│")
+
+    children = trace.get("children") or []
+    for i, child in enumerate(children):
+        walk(child, "", i == len(children) - 1)
+
+    return "\n".join(lines)
+
+
+@main.group("trace")
+def trace_group():
+    """Execution trace commands."""
+
+
+@trace_group.command("show")
+@click.argument("project_dir", default=".")
+@click.option("--cycle", "cycle_num", default=None, type=int, help="Cycle number (default: latest)")
+@click.option("--format", "fmt", type=click.Choice(["tree", "json", "flat"]), default="tree")
+def trace_show(project_dir, cycle_num, fmt):
+    """Show execution trace for a sprint cycle."""
+    import json as _json
+    from joshua.utils.tracer import CycleTracer
+
+    project_path = Path(project_dir).expanduser().resolve()
+    cycles = CycleTracer.list_cycles(project_path)
+    if not cycles:
+        click.echo("No traces found. Run a sprint first.", err=True)
+        raise SystemExit(1)
+
+    cycle = cycle_num if cycle_num is not None else cycles[-1]
+    data = CycleTracer.load(project_path, cycle)
+    if data is None:
+        click.echo(f"No trace found for cycle {cycle}.", err=True)
+        raise SystemExit(1)
+
+    if fmt == "json":
+        click.echo(_json.dumps(data, indent=2))
+    elif fmt == "flat":
+        def _flat(node, depth=0):
+            indent = "  " * depth
+            name = node.get("name", "?")
+            status = node.get("status", "")
+            dur = node.get("duration_ms", 0)
+            click.echo(f"{indent}{name}  [{status}]  {dur // 1000}s")
+            for child in (node.get("children") or []):
+                _flat(child, depth + 1)
+        _flat(data)
+    else:
+        use_color = sys.stdout.isatty()
+        click.echo(_render_trace_tree(data, use_color=use_color))
+
+
+@trace_group.command("list")
+@click.argument("project_dir", default=".")
+def trace_list(project_dir):
+    """List all available trace cycles for a project."""
+    from joshua.utils.tracer import CycleTracer
+
+    project_path = Path(project_dir).expanduser().resolve()
+    cycles = CycleTracer.list_cycles(project_path)
+    if not cycles:
+        click.echo("No traces found.")
+        return
+
+    click.echo(f"{'Cycle':>6}  {'Verdict':<10}  {'Duration':>10}  {'Agents':>6}  {'Tokens':>8}")
+    click.echo("-" * 55)
+    for c in cycles:
+        data = CycleTracer.load(project_path, c)
+        if not data:
+            continue
+        meta = data.get("metadata") or {}
+        verdict = meta.get("verdict", "—")
+        dur_ms = data.get("duration_ms", 0)
+        children = data.get("children") or []
+        agent_count = len([ch for ch in children if ch.get("type") in ("agent", "gate")])
+
+        def _sum_tokens(node):
+            return (node.get("tokens_out") or 0) + sum(
+                _sum_tokens(c) for c in (node.get("children") or [])
+            )
+
+        tokens = _sum_tokens(data)
+        click.echo(
+            f"{c:>6}  {verdict:<10}  {dur_ms // 1000:>8}s  {agent_count:>6}  {tokens:>8}"
+        )
+
+
 # ── joshua tips ────────────────────────────────────────────────────────────
 
 TIPS = [

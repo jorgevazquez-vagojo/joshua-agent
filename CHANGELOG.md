@@ -2,6 +2,14 @@
 
 All notable changes to joshua-agent are documented here.
 
+## [1.15.0] — 2026-04-08
+
+### Added
+- **Trace viewer — CycleTracer (MEJORA 1)**: nuevo módulo `joshua/utils/tracer.py` con `TraceNode` y `CycleTracer`. Cada ciclo genera `.joshua/traces/cycle-N.json` con el árbol completo de ejecución: ciclo → agentes → tool calls → gate → veredicto. Integrado en `_run_cycle()` con hooks `start_agent`, `finish_agent`, `start_gate`, `finish_gate`, `finish_cycle`, `save`. Non-fatal (errores de trace no interrumpen el sprint).
+- **`joshua trace show` / `joshua trace list` (MEJORA 2)**: nuevos subcomandos CLI bajo el grupo `trace`. `show` renderiza el trace como árbol ASCII con colores ANSI (verde=GO, amarillo=CAUTION, rojo=REVERT), JSON crudo o lista plana. `list` muestra tabla con ciclo, veredicto, duración, agentes y tokens.
+- **`GET /sprints/{id}/trace` y `GET /sprints/{id}/trace/list` (MEJORA 3)**: endpoints REST con auth para acceder a traces via API. Resuelven `project_dir` desde la config del sprint igual que los demás endpoints.
+- **`GET /ui/trace/{sprint_id}/{cycle}` (MEJORA 4)**: página HTML con D3.js (CDN) que renderiza un collapsible tree interactivo con zoom/pan. Tooltip detallado por nodo (input/output preview, tokens, duración, veredicto). Color-coded por status. Sprint_id y cycle inyectados server-side.
+
 ## [1.14.0] — 2026-04-08
 
 ### Added

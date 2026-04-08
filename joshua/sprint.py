@@ -36,6 +36,7 @@ from joshua.utils.preflight import run_preflight, check_memory, wait_for_memory
 from joshua.utils.scratchpad import clear_scratchpad, scratchpad_summary, write_scratchpad
 from joshua.utils.handoff import HandoffContext
 from joshua.utils.tool_check import check_tools
+from joshua.utils.tracer import CycleTracer
 from joshua.gate_contract import GateVerdict, GATE_JSON_SCHEMA
 
 log = logging.getLogger("joshua")
@@ -516,6 +517,9 @@ class Sprint:
         clear_scratchpad(self.project_dir)
         handoff = HandoffContext(cycle=self.cycle, project=self.project_name)
 
+        # v1.15.0: cycle tracer
+        tracer = CycleTracer(self.sprint_id, self.cycle, self.project_dir)
+
         # Phase 1: Run all work skills
         work_outputs: dict = {}
         cycle_tokens = 0
@@ -550,7 +554,11 @@ class Sprint:
                 task = f"{task}\n\n{extra_ctx}"
 
             self.sprint_logger.info(f"[{agent.name}] ({agent.skill}) Task: {task[:80]}")
+            # v1.15.0: trace agent start
+            tracer.start_agent(agent.name, task[:200])
             result = self._run_agent_with_retry(agent, task, context)
+            # v1.15.0: trace agent finish
+            tracer.finish_agent(agent.name, result)
 
             # v1.14.0: parse JSON_OUTPUT block if agent uses output_format=json
             if isinstance(agent_conf, dict) and agent_conf.get("output_format") == "json":
@@ -646,9 +654,18 @@ class Sprint:
             gate_task = "\n\n".join(report_parts)
 
             self.sprint_logger.info(f"[{agent.name}] ({agent.skill}) Reviewing cycle {self.cycle}...")
+            # v1.15.0: trace gate start
+            tracer.start_gate(gate_task[:200])
             result = self._run_agent_with_retry(agent, gate_task, context)
             cycle_tokens += result.tokens_out
             verdict = self._parse_verdict(result.output)
+            # v1.15.0: trace gate finish
+            tracer.finish_gate(
+                result,
+                verdict,
+                self.last_gate_confidence if self.last_gate_confidence is not None else 0.0,
+                self.last_effort_score,
+            )
             self._record_result(agent, f"gate-cycle-{self.cycle}", result)
 
             # Store gate findings for cross-agent context
@@ -782,6 +799,16 @@ class Sprint:
             maybe_create_ticket(self.config, verdict, self.project_name, self.cycle, self.last_gate_findings)
         except Exception as _ticket_err:
             log.warning(f"ticket_sink failed (non-fatal): {_ticket_err}")
+
+        # v1.15.0: save trace
+        try:
+            tracer.finish_cycle(
+                verdict,
+                self.last_gate_confidence if self.last_gate_confidence is not None else 0.0,
+            )
+            tracer.save()
+        except Exception as _trace_err:
+            log.warning(f"tracer.save failed (non-fatal): {_trace_err}")
 
         return verdict
 
