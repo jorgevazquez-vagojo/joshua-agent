@@ -36,6 +36,19 @@ from joshua.gate_contract import GateVerdict, GATE_JSON_SCHEMA
 log = logging.getLogger("joshua")
 
 
+def _load_joshuaignore(project_path: str) -> list[str]:
+    """Load .joshuaignore patterns from project root (gitignore-style)."""
+    ignore_file = Path(project_path) / ".joshuaignore"
+    if not ignore_file.exists():
+        return []
+    patterns = []
+    for line in ignore_file.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            patterns.append(line)
+    return patterns
+
+
 class Sprint:
     """Autonomous multi-agent development sprint."""
 
@@ -85,6 +98,19 @@ class Sprint:
         self.trigger = sprint_conf.get("trigger", "continuous")  # continuous | event | on_demand
         self.poll_interval = sprint_conf.get("poll_interval", 300)
         self.parallel_agents = sprint_conf.get("parallel_agents", False)
+
+        # REVERT approval
+        self.revert_requires_approval = sprint_conf.get("revert_requires_approval", False)
+        self.approval_timeout_minutes = sprint_conf.get("approval_timeout_minutes", 30)
+
+        # Cost control
+        runner_conf = config.get("runner", {})
+        self.max_sprint_cost_usd: float = runner_conf.get("max_sprint_cost_usd", 0.0)
+        self.cost_alert_threshold: float = runner_conf.get("cost_alert_threshold", 0.80)
+        self._sprint_cost_alerted = False
+
+        # .joshuaignore
+        self._joshuaignore_patterns: list[str] = _load_joshuaignore(self.project_dir)
 
         # Memory settings
         mem_conf = config.get("memory", {})
@@ -575,17 +601,28 @@ class Sprint:
 
         # Apply verdict
         self.stats[verdict.lower()] = self.stats.get(verdict.lower(), 0) + 1
+        self._last_verdict = verdict
         self.sprint_logger.info(f"VERDICT: {verdict}")
 
         if verdict == "REVERT":
             self.sprint_logger.warning("REVERT — changes will not be deployed")
             if self.gate_blocking:
                 self.gate_blocked = True
-            if self.git_strategy == "snapshot" and branch:
-                self.git.revert(branch)
-            elif self.git_strategy == "hillclimb" and hillclimb_sha:
-                self.git.reset_hard(hillclimb_sha)
-                self.sprint_logger.info(f"Hillclimb: reset to {hillclimb_sha[:12]}")
+
+            # Human-in-the-loop approval
+            do_revert = True
+            if self.revert_requires_approval:
+                do_revert = self._wait_for_revert_approval()
+
+            if do_revert:
+                if self.git_strategy == "snapshot" and branch:
+                    self.git.revert(branch)
+                elif self.git_strategy == "hillclimb" and hillclimb_sha:
+                    self.git.reset_hard(hillclimb_sha)
+                    self.sprint_logger.info(f"Hillclimb: reset to {hillclimb_sha[:12]}")
+            else:
+                self.sprint_logger.info("REVERT dismissed by operator — skipping rollback")
+
             self.notifier.notify_event("revert",
                 f"Cycle {self.cycle} REVERTED", self.project_name)
             findings_file = self._write_findings_file("revert")
@@ -639,6 +676,24 @@ class Sprint:
 
         # Accumulate token usage for cost estimation
         self.stats["total_tokens"] = self.stats.get("total_tokens", 0) + cycle_tokens
+        cost_usd = self.stats["total_tokens"] / 1_000_000 * 3.0
+        self.stats["cost_usd"] = round(cost_usd, 6)
+
+        # Cost control: alert and enforce limits
+        if self.max_sprint_cost_usd > 0:
+            if (not self._sprint_cost_alerted
+                    and cost_usd >= self.max_sprint_cost_usd * self.cost_alert_threshold):
+                self.sprint_logger.warning(
+                    f"Cost alert: ${cost_usd:.4f} reached "
+                    f"{self.cost_alert_threshold*100:.0f}% of max ${self.max_sprint_cost_usd:.2f}"
+                )
+                self._sprint_cost_alerted = True
+            if cost_usd >= self.max_sprint_cost_usd:
+                self.sprint_logger.warning(
+                    f"Sprint cost limit reached: ${cost_usd:.4f} >= ${self.max_sprint_cost_usd:.2f} — stopping"
+                )
+                self._stop_requested = True
+                self._stop_event.set()
 
         self._write_cycle_markdown(self.cycle, verdict, cycle_duration, cycle_tokens, work_outputs)
         self._run_hooks("post_cycle", {"JOSHUA_VERDICT": verdict})
@@ -908,6 +963,7 @@ class Sprint:
             "gate_findings": "",
             "program": self.program,
             "protected_files": self.protected_files,
+            "ignored_paths": self._joshuaignore_patterns,
         }
         if self.cross_agent_context and self.last_gate_findings:
             # Wrap in markers to prevent prompt injection from gate output
@@ -1012,6 +1068,81 @@ class Sprint:
         )
         return "CAUTION"
 
+    def _wait_for_revert_approval(self) -> bool:
+        """Wait for operator approval of REVERT action.
+
+        Returns True if approved (proceed with rollback), False if dismissed/timed out.
+        """
+        expires_at = datetime.fromtimestamp(
+            time.time() + self.approval_timeout_minutes * 60
+        ).isoformat()
+        pending = {
+            "verdict": "REVERT",
+            "timestamp": datetime.now().isoformat(),
+            "findings": self.last_gate_findings,
+            "expires_at": expires_at,
+            "cycle": self.cycle,
+        }
+        pending_path = self.state_dir / "approval_pending.json"
+        approval_path = self.state_dir / "approval.json"
+
+        # Remove stale approval file
+        approval_path.unlink(missing_ok=True)
+
+        pending_path.write_text(json.dumps(pending, indent=2))
+        self.sprint_logger.info(
+            f"REVERT approval required — waiting up to {self.approval_timeout_minutes}m. "
+            f"Write {approval_path} with {{\"approved\": true/false}} to proceed."
+        )
+
+        # Notify via existing notifier
+        try:
+            self.notifier.notify_event(
+                "revert_approval",
+                f"REVERT approval required for cycle {self.cycle}. "
+                f"Findings: {self.last_gate_findings[:200]}. "
+                f"Expires: {expires_at}",
+                self.project_name,
+            )
+        except Exception as e:
+            self.sprint_logger.warning(f"Approval notification failed: {e}")
+
+        deadline = time.monotonic() + self.approval_timeout_minutes * 60
+        poll_interval = 30
+        approved = None
+
+        while time.monotonic() < deadline:
+            if self._stop_requested:
+                break
+            if approval_path.exists():
+                try:
+                    data = json.loads(approval_path.read_text())
+                    approved = bool(data.get("approved", False))
+                    self.sprint_logger.info(
+                        f"Approval response received: approved={approved}"
+                    )
+                    break
+                except Exception:
+                    pass
+            self._wait_or_stop(min(poll_interval, deadline - time.monotonic()))
+
+        # Cleanup
+        try:
+            pending_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        try:
+            approval_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+        if approved is None:
+            self.sprint_logger.info(
+                f"REVERT approval timed out after {self.approval_timeout_minutes}m — skipping rollback"
+            )
+            return False
+        return approved
+
     def _deploy(self, cmd: str | None = None):
         """Run a deploy command safely (no shell=True)."""
         deploy_cmd = cmd or self.deploy_cmd
@@ -1063,7 +1194,11 @@ class Sprint:
             "gate_blocked": self.gate_blocked,
             "last_gate_findings": self.last_gate_findings,
             "last_gate_severity": self.last_gate_severity,
+            "last_gate_confidence": self.last_gate_confidence,
+            "last_verdict": getattr(self, "_last_verdict", ""),
             "consecutive_errors": self.consecutive_errors,
+            "total_tokens": self.stats.get("total_tokens", 0),
+            "cost_usd": self.stats.get("cost_usd", 0.0),
         }
         path = self.state_dir / "checkpoint.json"
         tmp = path.with_suffix(".tmp")

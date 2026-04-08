@@ -2,6 +2,27 @@
 
 All notable changes to joshua-agent are documented here.
 
+## [1.6.0] — 2026-04-08
+
+### Added
+- **`joshua pr <url> <config>`**: run a full QA sprint on a GitHub PR or GitLab MR. Checks out the PR branch, runs the sprint, posts a Markdown comment with the verdict and gate findings, and posts a commit status (success/failure) via `GitHubStatusCheck` / `GitLabStatusCheck`.
+- **Cost control**: `runner.max_daily_cost_usd`, `runner.max_sprint_cost_usd`, `runner.cost_alert_threshold` config fields. Sprint tracks cumulative cost in `stats["cost_usd"]`; logs a warning at `cost_alert_threshold` and halts with `BUDGET_EXCEEDED` at `max_sprint_cost_usd`. `checkpoint.json` now includes `cost_usd` and `total_tokens`.
+- **`joshua cost`**: print per-cycle token/cost table from `checkpoint.json` + `results.tsv`. `--csv FILE` exports to CSV.
+- **Human-in-the-loop REVERT approval** (`sprint.revert_requires_approval: true`): before executing a git revert, the sprint writes `approval_pending.json` and polls for `approval.json`. Times out after `sprint.approval_timeout_minutes` minutes and skips the rollback if no response. New server endpoints `GET /sprints/{id}/approval` and `POST /sprints/{id}/approval`.
+- **`joshua approve <sprint_id>`**: write `approval.json` (approved/rejected) for a pending REVERT via CLI.
+- **RBAC + /ui authentication**: viewer/operator/admin role hierarchy controlled by `JOSHUA_TOKENS` env var (JSON `{"token": "role"}`). Bearer token or `joshua_token` cookie. `GET /login` HTML form, `POST /login` sets cookie. Legacy `JOSHUA_AUTH_TOKEN` still works as admin token.
+- **`joshua agent-log <sprint_id>`**: inspect per-agent outputs in stored cycle JSON files. Supports `--cycle N` and `--agent NAME` filters.
+- **`.joshuaignore`**: gitignore-style file at project root. Patterns are passed to agents in build context as `ignored_paths` so they avoid touching those files.
+- **`joshua init --from-repo <github_url>`**: bootstrap a `joshua.yaml` from a GitHub repo URL. Auto-detects stack (Node.js, Python, Go, Rust, Docker) from repo contents via GitHub API and pre-fills `deploy` and `objective_metric` hints.
+- **`GET /fleet`**: aggregates stats across all sprints listed in `JOSHUA_FLEET_CONFIG` fleet YAML. Returns per-sprint summaries (last verdict, cost, cycles).
+- **`GET /digest`**: weekly summary JSON across all known sprints — total cycles, verdicts distribution, cost totals.
+- **`joshua digest`**: CLI wrapper for `/digest` — prints a Markdown weekly summary.
+
+### Changed
+- `SprintConfig` gains `revert_requires_approval: bool` and `approval_timeout_minutes: int` fields.
+- `RunnerConfig` gains `max_daily_cost_usd`, `max_sprint_cost_usd`, `cost_alert_threshold` fields.
+- `_build_context()` now includes `ignored_paths` from `.joshuaignore`.
+
 ## [1.5.0] — 2026-04-08
 
 ### Added

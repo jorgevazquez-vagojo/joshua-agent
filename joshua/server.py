@@ -841,3 +841,275 @@ def compare_history(limit: int = Query(default=10, ge=1, le=100)):
     except Exception as exc:
         log.warning(f"Failed to read compare history: {exc}")
         return []
+
+
+# ── RBAC ───────────────────────────────────────────────────────────────
+
+_ROLE_LEVELS = {"viewer": 0, "operator": 1, "admin": 2}
+
+# Parse JOSHUA_TOKENS: JSON map {"token": "role", ...}
+# Backward compat: if JOSHUA_AUTH_TOKEN set, treat as admin
+_ROLE_MAP: dict[str, str] = {}
+_rbac_tokens_raw = os.environ.get("JOSHUA_TOKENS", "")
+if _rbac_tokens_raw:
+    try:
+        _ROLE_MAP = __import__("json").loads(_rbac_tokens_raw)
+    except Exception:
+        log.warning("JOSHUA_TOKENS is not valid JSON — RBAC disabled")
+_legacy_admin = os.environ.get("JOSHUA_AUTH_TOKEN", "")
+if _legacy_admin and _legacy_admin not in _ROLE_MAP:
+    _ROLE_MAP[_legacy_admin] = "admin"
+
+
+def get_role(request: Request) -> str | None:
+    """Extract role from Bearer token or cookie."""
+    auth = request.headers.get("Authorization", "")
+    token = ""
+    if auth.startswith("Bearer "):
+        token = auth[7:].strip()
+    if not token:
+        token = request.cookies.get("joshua_token", "")
+    if not token:
+        return None
+    return _ROLE_MAP.get(token)
+
+
+def require_role(min_role: str):
+    """FastAPI dependency: require at least min_role."""
+    def _dep(request: Request):
+        if not _ROLE_MAP:
+            return  # RBAC not configured — open access
+        role = get_role(request)
+        if role is None:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        if _ROLE_LEVELS.get(role, -1) < _ROLE_LEVELS.get(min_role, 999):
+            raise HTTPException(status_code=403, detail=f"Insufficient role: need {min_role}")
+    return _dep
+
+
+# ── Login routes ──────────────────────────────────────────────────────
+
+_LOGIN_HTML = """<!DOCTYPE html><html><head><title>Joshua Login</title>
+<style>body{font-family:monospace;background:#0d1117;color:#e6edf3;display:flex;justify-content:center;padding-top:4rem;}
+.box{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:2rem;min-width:300px;}
+h2{color:#58a6ff;margin:0 0 1.5rem 0;}
+input{width:100%;padding:.5rem;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:4px;font-family:monospace;}
+button{margin-top:1rem;width:100%;padding:.6rem;background:#238636;color:#fff;border:none;border-radius:4px;cursor:pointer;font-family:monospace;}
+.err{color:#f85149;margin-top:.5rem;}</style></head>
+<body><div class="box"><h2>&#9881; Joshua Login</h2>
+<form method="POST" action="/login">
+<label>Token</label><br><input type="password" name="token" autofocus><br>
+<button type="submit">Sign in</button>
+</form></div></body></html>"""
+
+
+@app.get("/login", include_in_schema=False)
+def login_form():
+    return HTMLResponse(_LOGIN_HTML)
+
+
+@app.post("/login", include_in_schema=False)
+async def login_submit(request: Request):
+    from fastapi.responses import RedirectResponse
+    form = await request.form()
+    token = form.get("token", "")
+    role = _ROLE_MAP.get(token) if _ROLE_MAP else "admin"
+    if role is None:
+        return HTMLResponse(_LOGIN_HTML + '<script>document.write("<p class=err>Invalid token.</p>")</script>')
+    resp = RedirectResponse(url="/ui", status_code=303)
+    resp.set_cookie("joshua_token", token, httponly=True, samesite="lax")
+    return resp
+
+
+# ── Approval endpoints ────────────────────────────────────────────────
+
+class ApprovalRequest(BaseModel):
+    approved: bool
+
+
+def _get_sprint_state_dir(sprint_id: str) -> Path | None:
+    """Derive state dir from sprint config."""
+    if not _db:
+        return None
+    row = _db.get_sprint(sprint_id)
+    if not row:
+        return None
+    config = row.get("config") or {}
+    project_path = config.get("project", {}).get("path", "")
+    state_dir_override = config.get("memory", {}).get("state_dir", "")
+    if state_dir_override:
+        return Path(state_dir_override)
+    if project_path:
+        return Path(project_path) / ".joshua"
+    return None
+
+
+@app.get("/sprints/{sprint_id}/approval", dependencies=[Depends(require_role("operator"))])
+def get_approval(sprint_id: str):
+    """Return current approval_pending.json if a REVERT approval is waiting."""
+    import json as _json
+    state_dir = _get_sprint_state_dir(sprint_id)
+    if not state_dir:
+        raise HTTPException(404, f"Sprint {sprint_id} not found")
+    pending_path = state_dir / "approval_pending.json"
+    if not pending_path.exists():
+        return {"pending": False}
+    try:
+        data = _json.loads(pending_path.read_text())
+        return {"pending": True, **data}
+    except Exception:
+        return {"pending": False}
+
+
+@app.post("/sprints/{sprint_id}/approval", dependencies=[Depends(require_role("operator"))])
+def post_approval(sprint_id: str, req: ApprovalRequest):
+    """Approve or dismiss a pending REVERT action."""
+    import json as _json
+    state_dir = _get_sprint_state_dir(sprint_id)
+    if not state_dir:
+        raise HTTPException(404, f"Sprint {sprint_id} not found")
+    pending_path = state_dir / "approval_pending.json"
+    if not pending_path.exists():
+        raise HTTPException(409, "No approval pending for this sprint")
+    approval_path = state_dir / "approval.json"
+    decision = {"approved": req.approved, "timestamp": datetime.now().isoformat()}
+    approval_path.write_text(_json.dumps(decision, indent=2))
+    log.info(f"Approval for sprint {sprint_id}: approved={req.approved}")
+    return {"ok": True, "approved": req.approved}
+
+
+# ── Fleet dashboard ───────────────────────────────────────────────────
+
+@app.get("/fleet")
+def fleet_overview():
+    """Fleet overview — reads JOSHUA_FLEET_CONFIG env var pointing to fleet.yaml."""
+    import json as _json
+    fleet_config_path = os.environ.get("JOSHUA_FLEET_CONFIG", "")
+    if not fleet_config_path:
+        return []
+    fleet_file = Path(fleet_config_path)
+    if not fleet_file.exists():
+        raise HTTPException(404, f"Fleet config not found: {fleet_config_path}")
+    try:
+        import yaml as _yaml
+        fleet_cfg = _yaml.safe_load(fleet_file.read_text())
+        sprint_paths = fleet_cfg.get("sprints", [])
+    except ImportError:
+        raise HTTPException(500, "PyYAML not available")
+    except Exception as e:
+        raise HTTPException(500, f"Failed to read fleet config: {e}")
+
+    results = []
+    for sprint_path in sprint_paths:
+        try:
+            sp = Path(sprint_path)
+            if not sp.exists():
+                results.append({"name": str(sprint_path), "error": "config not found"})
+                continue
+            import yaml as _yaml
+            cfg = _yaml.safe_load(sp.read_text())
+            project = cfg.get("project", {})
+            project_dir = project.get("path", "")
+            project_name = project.get("name", sp.stem)
+            state_dir = Path(
+                cfg.get("memory", {}).get("state_dir", "")
+                or (project_dir and str(Path(project_dir) / ".joshua"))
+                or ".joshua"
+            )
+            cp_path = state_dir / "checkpoint.json"
+            verdict = cycle = cost_usd = None
+            trend = "unknown"
+            if cp_path.exists():
+                try:
+                    cp = _json.loads(cp_path.read_text())
+                    verdict = cp.get("last_verdict", "")
+                    cycle = cp.get("cycle", 0)
+                    cost_usd = cp.get("cost_usd", cp.get("stats", {}).get("cost_usd", 0.0))
+                    stats = cp.get("stats", {})
+                    total = stats.get("go", 0) + stats.get("caution", 0) + stats.get("revert", 0)
+                    if total > 0:
+                        go_pct = stats.get("go", 0) / total
+                        if go_pct > 0.8:
+                            trend = "improving"
+                        elif stats.get("revert", 0) / total > 0.3:
+                            trend = "degrading"
+                        else:
+                            trend = "stable"
+                except Exception:
+                    pass
+            results.append({
+                "name": project_name,
+                "verdict": verdict,
+                "cycle": cycle,
+                "cost_usd": cost_usd,
+                "trend": trend,
+            })
+        except Exception as e:
+            results.append({"name": str(sprint_path), "error": str(e)})
+
+    return results
+
+
+# ── Weekly digest endpoint ────────────────────────────────────────────
+
+@app.get("/digest")
+def weekly_digest():
+    """Generate weekly summary across all sprints."""
+    if not _db:
+        return {}
+    rows = _db.list_sprints()
+    total_sprints = len(rows)
+    total_cycles = 0
+    total_cost = 0.0
+    verdict_breakdown: dict[str, int] = {"GO": 0, "CAUTION": 0, "REVERT": 0}
+    all_findings: list[str] = []
+
+    for row in rows:
+        stats = row.get("stats") or {}
+        total_cycles += (
+            stats.get("go", 0) + stats.get("caution", 0)
+            + stats.get("revert", 0) + stats.get("errors", 0)
+        )
+        total_cost += stats.get("cost_usd", stats.get("total_tokens", 0) / 1_000_000 * 3.0)
+        verdict_breakdown["GO"] += stats.get("go", 0)
+        verdict_breakdown["CAUTION"] += stats.get("caution", 0)
+        verdict_breakdown["REVERT"] += stats.get("revert", 0)
+
+        # Try to read findings from checkpoint
+        config = row.get("config") or {}
+        project_path = config.get("project", {}).get("path", "")
+        state_dir_override = config.get("memory", {}).get("state_dir", "")
+        state_dir = (
+            Path(state_dir_override)
+            if state_dir_override
+            else (Path(project_path) / ".joshua" if project_path else None)
+        )
+        if state_dir:
+            cp = state_dir / "checkpoint.json"
+            if cp.exists():
+                try:
+                    import json as _json
+                    data = _json.loads(cp.read_text())
+                    findings = data.get("last_gate_findings", "")
+                    if findings:
+                        all_findings.append(findings[:200])
+                except Exception:
+                    pass
+
+    # Top recurring patterns in findings
+    from collections import Counter as _Counter
+    word_counts = _Counter()
+    for f in all_findings:
+        for word in f.lower().split():
+            if len(word) > 5:
+                word_counts[word] += 1
+    top_findings = [w for w, _ in word_counts.most_common(3)]
+
+    return {
+        "period": "last 7 days",
+        "total_sprints": total_sprints,
+        "total_cycles": total_cycles,
+        "total_cost_usd": round(total_cost, 4),
+        "verdict_breakdown": verdict_breakdown,
+        "top_recurring_findings": top_findings,
+    }

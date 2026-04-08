@@ -40,6 +40,9 @@ class RunnerConfig(BaseModel):
     model: Optional[str] = None
     binary: Optional[str] = None
     command: Optional[str] = None  # for custom runner
+    max_daily_cost_usd: float = Field(default=0.0, ge=0)
+    max_sprint_cost_usd: float = Field(default=0.0, ge=0)
+    cost_alert_threshold: float = Field(default=0.80, ge=0, le=1)
 
     @model_validator(mode="after")
     def custom_requires_command(self) -> RunnerConfig:
@@ -81,6 +84,8 @@ class SprintConfig(BaseModel):
     trigger: Literal["continuous", "event", "on_demand"] = "continuous"
     poll_interval: int = Field(default=300, ge=30)  # seconds between polls in event mode
     parallel_agents: bool = False  # run work agents concurrently (gate remains sequential)
+    revert_requires_approval: bool = Field(default=False)
+    approval_timeout_minutes: int = Field(default=30, ge=1)
 
     @field_validator("recovery_deploy", mode="before")
     @classmethod
