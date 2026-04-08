@@ -1,26 +1,51 @@
 # joshua-agent
 
-**Autonomous gated software sprints.**
+**Autonomous gated software sprints. Define your team in YAML — dev, bug-hunter, QA. The gate decides: ✅ deploy, ⚠️ review, ❌ roll back. You come back to a log.**
 
-| Signal | Status |
+```
+pip install joshua-agent
+```
+
+| | |
 | --- | --- |
-| Package | `1.15.0` |
-| Tests | `362 pytest tests`; CI runs on Python `3.11`, `3.12`, `3.13` |
-| Release path | GitHub Actions CI + PyPI publish workflow |
+| **Version** | `1.15.0` |
+| **Tests** | 396 passing · Python 3.11 / 3.12 / 3.13 |
+| **Runners** | Claude Code · OpenAI Codex · Aider · any CLI tool |
+| **License** | MIT |
+
+---
+
+## What is it?
+
+joshua-agent runs a team of AI agents in cycles. Each cycle: work agents (dev, bug-hunter, or any custom role) do the job. A gate agent reviews the output and issues a verdict:
+
+- **GO** → deploy hook runs automatically
+- **CAUTION** → sprint continues, findings flagged for review
+- **REVERT** → changes rolled back via git, sprint continues on next cycle
+
+Agents share context, extract lessons, and build a wiki that improves future runs. You define the team in a YAML file and walk away.
+
+> *One day, teams will stop babysitting AI. Instead of prompting one agent at a time — copy, paste, check, repeat — they'll define a team in a YAML file and walk away. The agents run in cycles: execute tasks, review each other, deploy or roll back, extract lessons, sleep, repeat. You come back to a log of what happened and (hopefully) better output than yesterday.*
+> — @jorgevazquez, April 2026
+
+**Works with any LLM runner.** Claude Code, OpenAI Codex, Aider, or any CLI tool that accepts a prompt. Swap it in the YAML — everything else stays the same. Use different models for different agents: Opus for the gate, Sonnet for work agents, a local model for experiments.
+
+Named after the AI in WarGames that learned the only winning move is to keep playing.
+
+## Supported runners
+
+| Runner | Install | YAML `command` |
+|--------|---------|----------------|
+| **Claude Code** | `npm i -g @anthropic-ai/claude-code` | `claude --dangerously-skip-permissions -p "{task}"` |
+| **OpenAI Codex** | `npm i -g @openai/codex` | `codex -q "{task}"` |
+| **Aider** | `pip install aider-chat` | `aider --message "{task}"` |
+| **Custom** | any CLI | `my-tool --prompt "{task}" --dir {cwd}` |
 
 ## Demo
 
 ![joshua-agent demo](assets/demo.gif)
 
 *Real execution: 2 cycles — Cycle 1 GO (deploy), Cycle 2 REVERT (rollback). [asciinema recording](assets/demo.cast)*
-
-Define your team in YAML. Agents work in cycles — dev, bug-hunter, QA. The gate decides:  deploys.  rolls back. You come back to a log.
-
-*One day, teams will stop babysitting AI. Instead of prompting one agent at a time — copy, paste, check, repeat — they'll define a team in a YAML file and walk away. The agents run in cycles: execute tasks, review each other, deploy or roll back, extract lessons, sleep, repeat. You come back to a log of what happened and (hopefully) better output than yesterday. — @jorgevazquez, April 2026*
-
-Built for software delivery. Each cycle: work agents write and fix code, a gate agent reviews and issues a verdict.  → deploy.  → continue carefully.  → roll back via git. Lessons accumulate, a wiki builds itself, future prompts get sharper. Extensible to any domain — document review, compliance, financial analysis — once you understand the core loop.
-
-Named after the AI in WarGames that learned the only winning move is to keep playing.
 
 ```
 
@@ -229,16 +254,7 @@ Sleeping 600s before next cycle...
 
 **Hillclimb git strategy.** `git_strategy: hillclimb` turns git into a hill-climbing checkpoint. Before each cycle, joshua-agent commits the current state. After work agents run and the gate reviews, a `REVERT` verdict triggers `git reset --hard` to the checkpoint. A `GO` verdict keeps the commit. The result: every surviving commit in git history is a verified improvement. Compare with `snapshot`, which creates branches per cycle — hillclimb is simpler and produces a linear history.
 
-**Three trigger modes.** `sprint.trigger` controls when cycles run. `continuous` (default) runs cycles back-to-back with `cycle_sleep` between them — good for proactive improvement. `event` polls task sources (Jira, GitHub) every `poll_interval` seconds and only runs a cycle when there's real work — no tasks, no Claude calls, no tokens burned. `on_demand` waits for an external trigger via the API (`trigger_cycle()`) — useful for CI/CD integration where a deploy or PR event kicks off a review.
-
-## Supported runners
-
-| Runner | Command | Install |
-|--------|---------|---------|
-| **Claude Code** | `claude` | `npm i -g @anthropic-ai/claude-code` |
-| **OpenAI Codex** | `codex` | `npm i -g @openai/codex` |
-| **Aider** | `aider` | `pip install aider-chat` |
-| **Custom** | any CLI | `command: "my-tool --input {prompt_file} --dir {cwd}"` |
+**Three trigger modes.** `sprint.trigger` controls when cycles run. `continuous` (default) runs cycles back-to-back with `cycle_sleep` between them — good for proactive improvement. `event` polls task sources (Jira, GitHub) every `poll_interval` seconds and only runs a cycle when there's real work — no tasks, no LLM calls, no tokens burned. `on_demand` waits for an external trigger via the API (`trigger_cycle()`) — useful for CI/CD integration where a deploy or PR event kicks off a review.
 
 ## Full config reference
 

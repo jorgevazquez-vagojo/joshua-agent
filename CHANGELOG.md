@@ -5,33 +5,33 @@ All notable changes to joshua-agent are documented here.
 ## [1.15.0] — 2026-04-08
 
 ### Added
-- **Trace viewer — CycleTracer (MEJORA 1)**: nuevo módulo `joshua/utils/tracer.py` con `TraceNode` y `CycleTracer`. Cada ciclo genera `.joshua/traces/cycle-N.json` con el árbol completo de ejecución: ciclo → agentes → tool calls → gate → veredicto. Integrado en `_run_cycle()` con hooks `start_agent`, `finish_agent`, `start_gate`, `finish_gate`, `finish_cycle`, `save`. Non-fatal (errores de trace no interrumpen el sprint).
-- **`joshua trace show` / `joshua trace list` (MEJORA 2)**: nuevos subcomandos CLI bajo el grupo `trace`. `show` renderiza el trace como árbol ASCII con colores ANSI (verde=GO, amarillo=CAUTION, rojo=REVERT), JSON crudo o lista plana. `list` muestra tabla con ciclo, veredicto, duración, agentes y tokens.
-- **`GET /sprints/{id}/trace` y `GET /sprints/{id}/trace/list` (MEJORA 3)**: endpoints REST con auth para acceder a traces via API. Resuelven `project_dir` desde la config del sprint igual que los demás endpoints.
-- **`GET /ui/trace/{sprint_id}/{cycle}` (MEJORA 4)**: página HTML con D3.js (CDN) que renderiza un collapsible tree interactivo con zoom/pan. Tooltip detallado por nodo (input/output preview, tokens, duración, veredicto). Color-coded por status. Sprint_id y cycle inyectados server-side.
+- **Trace viewer — `CycleTracer`**: new `joshua/utils/tracer.py` module with `TraceNode` and `CycleTracer`. Each cycle writes `.joshua/traces/cycle-N.json` with the full execution tree: sprint → agents → gate → verdict. Integrated in `_run_cycle()` via `start_agent`, `finish_agent`, `start_gate`, `finish_gate`, `finish_cycle`, and `save` hooks. Non-fatal — trace errors never interrupt a sprint.
+- **`joshua trace show` / `joshua trace list`**: new CLI subcommands under the `trace` group. `show` renders the trace as an ASCII tree with ANSI colors (green = GO, yellow = CAUTION, red = REVERT), raw JSON, or a flat list. `list` shows a summary table with cycle number, verdict, duration, agent count, and token totals.
+- **`GET /sprints/{id}/trace`** and **`GET /sprints/{id}/trace/list`**: auth-protected REST endpoints for programmatic access to trace data.
+- **`GET /ui/trace/{sprint_id}/{cycle}`**: interactive HTML page using D3.js — collapsible tree with zoom/pan and per-node tooltips showing input/output previews, token counts, durations, and verdicts. Color-coded by node status.
 
 ## [1.14.0] — 2026-04-08
 
 ### Added
-- **Scratchpad compartido (MEJORA 1)**: nuevo módulo `joshua/utils/scratchpad.py`. Al inicio de cada ciclo se limpia `cycle_context.json`. Cada agente puede escribir un bloque `SCRATCHPAD:` en su output que el orquestador parsea y persiste. El siguiente agente recibe el resumen vía `scratchpad_summary()` inyectado al final de su task prompt.
-- **Output tipado del subagente (MEJORA 2)**: `AgentConfig` añade `output_format: "text"|"json"`, `output_schema` y `AgentOutputSchema`. Si `output_format="json"`, el task prompt incluye instrucciones para emitir un bloque `JSON_OUTPUT:`. El sprint parsea el bloque y guarda el resultado en `RunResult.structured_output`.
-- **Handoff estructurado (MEJORA 3)**: nuevo módulo `joshua/utils/handoff.py` con `HandoffContext`. Se crea al inicio de cada ciclo; después de cada agente de trabajo se registra su resultado. El siguiente agente recibe el contexto formateado como sección del prompt.
-- **Tool use declarativo (MEJORA 4)**: `AgentConfig` añade campo `tools: list[str]`. Nuevo módulo `joshua/utils/tool_check.py` con `check_tools()`. Antes de lanzar cada agente, el orquestador verifica disponibilidad; si faltan herramientas, el agente se omite con warning.
-- **Interrupciones por tokens (MEJORA 5)**: `AgentConfig` añade `max_tokens_per_run: int` (0 = ilimitado). Tras cada ejecución, si los tokens estimados superan el límite, se registra `RunResult.killed_by_token_limit = True` y se emite warning.
-- **`RunResult` ampliado**: nuevos campos `structured_output: dict | None` y `killed_by_token_limit: bool`.
-- **`KNOWN_TOOLS`**: diccionario en `config_schema.py` que mapea nombres lógicos de herramientas a comandos CLI verificables.
+- **Shared scratchpad**: new `joshua/utils/scratchpad.py` module. Cleared at cycle start via `cycle_context.json`. Agents write `SCRATCHPAD:` blocks in their output; the orchestrator parses and persists them. The next agent receives a `scratchpad_summary()` injected at the end of its task prompt — agents share context without free-form prompt chaining.
+- **Typed agent output**: `AgentConfig` adds `output_format: "text" | "json"`, `output_schema`, and `AgentOutputSchema`. When `output_format = "json"`, the task prompt instructs the agent to emit a `JSON_OUTPUT:` block. The sprint parses the block and saves the result to `RunResult.structured_output`.
+- **Structured handoffs**: new `joshua/utils/handoff.py` with `HandoffContext`. Created at cycle start; after each work agent completes, its result is registered. The next agent receives the formatted context as a prompt prefix — replacing free-text injection with structured, typed data.
+- **Declarative tool declarations**: `AgentConfig` adds a `tools: list[str]` field. New `joshua/utils/tool_check.py` with `check_tools()`. Before launching each agent, the orchestrator verifies tool availability; agents with missing tools are skipped with a warning rather than failing mid-sprint.
+- **Token-limit interruptions**: `AgentConfig` adds `max_tokens_per_run: int` (0 = unlimited). After each run, if estimated output tokens exceed the limit, `RunResult.killed_by_token_limit = True` is set and a warning is emitted.
+- **`RunResult` extended**: new fields `structured_output: dict | None` and `killed_by_token_limit: bool`.
+- **`KNOWN_TOOLS`**: dictionary in `config_schema.py` mapping logical tool names to verifiable CLI commands.
 
-> Nota: se salta la versión 1.13.0 intencionalmente.
+> Note: version 1.13.0 is intentionally skipped.
 
 ## [1.12.0] — 2026-04-08
 
 ### Added
-- **Effort score (MEJORA 1a)**: gate agents now output `EFFORT: <1-5>` alongside the JSON verdict. Sprint parses it with `_parse_effort_score()`, stores it in `checkpoint.json` as `effort_score`, adds it as a column in `results.tsv`, and exposes it in `joshua status --json` and the server `GET /sprints/{id}` response.
-- **`joshua learn` (MEJORA 1b)**: new CLI subcommand that records a lesson from the last accepted CAUTION verdict. Reads `checkpoint.json`, validates `last_verdict == "CAUTION"`, auto-extracts lesson text from gate findings/issues (or accepts `--message`), and appends to `.joshua/wiki/lessons.json`.
-- **Agent backstory (MEJORA 2)**: `AgentConfig` and `Agent` now support a `backstory` field. When set, it is prepended to the system prompt as `Background: <backstory>`. Useful for giving agents persistent behavioral context across sprint cycles.
-- **`joshua watch` with rich TUI (MEJORA 3)**: new dedicated `watch` command with a live-refreshing dashboard. Uses `rich.live` for a full TUI panel (state, verdict, effort score, cost, tokens, memory, wiki). Falls back to plain text if rich is unavailable or `--no-tui` is passed.
-- **State machine (MEJORA 4)**: sprint now tracks explicit lifecycle states: `IDLE → RUNNING → GATING → REVERTING/PAUSED → DONE/ERROR`. State and `state_since` timestamp are persisted in `checkpoint.json`. `joshua status --json` exposes `state` and `state_since`. Server `SprintStatus` exposes `state` and `effort_score`.
-- **`joshua status` redesign**: command now accepts `project_dir` (default `.`) instead of raw `state_dir`. `--json` output includes `state`, `state_since`, `effort_score`, `cost_usd`, `total_tokens`. `--watch` flag removed — use `joshua watch` instead.
+- **Effort score**: gate agents now emit `EFFORT: <1-5>` alongside the JSON verdict. Parsed by `_parse_effort_score()`, stored in `checkpoint.json`, added as a column in `results.tsv`, and exposed in `joshua status --json` and `GET /sprints/{id}`.
+- **`joshua learn`**: new CLI subcommand to record a lesson from the last accepted CAUTION verdict. Reads `checkpoint.json`, validates `last_verdict == "CAUTION"`, auto-extracts lesson text from gate findings (or accepts `--message`), and appends to `.joshua/wiki/lessons.json`.
+- **Agent backstory**: `AgentConfig` and `Agent` now support a `backstory` field. When set, it is prepended to the system prompt as `Background: <backstory>`, giving agents persistent behavioral context across sprint cycles.
+- **`joshua watch` with rich TUI**: new dedicated `watch` command with a live-refreshing terminal dashboard. Uses `rich.live` to render a full TUI panel showing state, verdict, effort score, cost, tokens, memory, and wiki entries. Falls back gracefully to plain text if rich is unavailable or `--no-tui` is passed.
+- **State machine**: sprint now tracks explicit lifecycle states: `IDLE → RUNNING → GATING → REVERTING / PAUSED → DONE / ERROR`. State and `state_since` timestamp are persisted in `checkpoint.json`. `joshua status --json` and the server `SprintStatus` model both expose `state`, `state_since`, and `effort_score`.
+- **`joshua status` redesign**: command now accepts `project_dir` (default `.`) instead of a raw state dir. `--json` output includes `state`, `state_since`, `effort_score`, `cost_usd`, and `total_tokens`. `--watch` flag removed — use `joshua watch` instead.
 - **`rich>=13.0`** added as a core dependency.
 
 ## [1.11.0] — 2026-04-08
