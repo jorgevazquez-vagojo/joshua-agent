@@ -1,0 +1,84 @@
+# Primor — Mobile App QA + API Testing sprint
+# Cubre la app móvil de Primor (iOS/Android) vía sus endpoints Magento REST/GraphQL.
+#
+# Uso:
+#   PRIMOR_MOBILE_PATH=~/primor-mobile TELEGRAM_TOKEN=xxx TELEGRAM_CHAT_ID=yyy \
+#   joshua run examples/primor-mobile.yaml
+#
+# No despliega nada. Los reportes se acumulan en {PRIMOR_MOBILE_PATH}/reports/.
+# Requiere que el directorio de proyecto exista (puede estar vacío inicialmente).
+
+project:
+  name: primor-mobile
+  path: ${PRIMOR_MOBILE_PATH:~/primor-mobile}
+  site_url: https://primor.eu
+
+runner:
+  type: claude
+  timeout: 1800
+  allowed_tools:
+    - Bash
+    - Read
+    - Write
+    - Glob
+    - Grep
+
+agents:
+  # ── Tester de API móvil ─────────────────────────────────────────
+  mobile-tester:
+    skill: mobile-tester
+    name: apitester
+    run_when_blocked: true
+    tasks:
+      - "Audita autenticación: POST /rest/V1/integration/customer/token con credenciales válidas/inválidas. Verifica JWT structure, expiración, refresh. Prueba token expirado y sin token en endpoints protegidos."
+      - "Audita catálogo de productos: GET /rest/V1/products con filtros de categoría, precio, marca. Verifica campos críticos para móvil: name, price, sku, media_gallery_entries, extension_attributes. Mide latencia."
+      - "Audita carrito y checkout: crea carrito guest y autenticado, añade producto, actualiza cantidad, aplica cupón, consulta shipping methods, completa order. Verifica respuestas en cada paso."
+      - "Audita búsqueda: GET /rest/V1/products?searchCriteria con términos en español. Verifica relevancia, spelling tolerance, resultados vacíos vs 0 productos reales. Compara con búsqueda web."
+      - "Audita wishlist, cuenta y pedidos: GET /rest/V1/customers/me, GET /rest/V1/orders, PUT /rest/V1/customers/me. Verifica campos de dirección española (NIF, provincia), formato de fecha y moneda."
+
+  # ── Investigador de experiencia móvil en vivo ───────────────────
+  researcher:
+    skill: researcher
+    name: mobile-probe
+    run_when_blocked: true
+    tasks:
+      - "Simula navegación mobile: prueba las 20 URLs más visitadas con iPhone user-agent. Verifica que el sitio web mobile sirve contenido correcto y no redirige a app store inesperadamente. Mide Core Web Vitals básicos (LCP via curl timing)."
+      - "Verifica deep links y universal links: prueba URLs de producto y categoría en formato app (primor://product/xxx). Comprueba que .well-known/apple-app-site-association y assetlinks.json existen y son válidos."
+      - "Audita endpoints de notificaciones push y configuración de app: /rest/V1/push-notification (si existe), configuración de país/idioma, endpoint de versiones mínimas de app."
+
+  # ── Gate: clasificador de hallazgos e-commerce ──────────────────
+  qa:
+    skill: ecommerce-qa
+    name: sentinel-mobile
+    # phase: gate (auto-detected)
+
+sprint:
+  cycle_sleep: 600          # 10 min entre ciclos
+  max_cycles: 30
+  max_consecutive_errors: 3
+  gate_blocking: true
+  cross_agent_context: true
+  git_strategy: none
+
+memory:
+  enabled: true
+  lessons_per_cycle: 5
+
+notifications:
+  type: telegram
+  token: ${TELEGRAM_TOKEN}
+  chat_id: ${TELEGRAM_CHAT_ID}
+
+safety:
+  allowed_commands:
+    - curl
+    - python
+    - python3
+    - grep
+    - find
+    - cat
+    - ls
+    - mkdir
+    - jq
+  allowed_paths:
+    - ${PRIMOR_MOBILE_PATH:~/primor-mobile}
