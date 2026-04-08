@@ -4,8 +4,7 @@
 
 | Signal | Status |
 | --- | --- |
-| Package | `0.9.0` |
-| Repo | `50 commits` on `main` |
+| Package | `1.3.0` |
 | Tests | `303 pytest tests`; CI runs on Python `3.11`, `3.12`, `3.13` |
 | Release path | GitHub Actions CI + PyPI publish workflow |
 
@@ -31,7 +30,7 @@ Named after the AI in WarGames that learned the only winning move is to keep pla
 
 - YAML-defined multi-agent sprints with `work` and `gate` phases
 - `GO` / `CAUTION` / `REVERT` verdict loop with snapshot or hillclimb git strategies
-- CLI workflow: `joshua run`, `joshua status`, `joshua evolve`, `joshua serve`
+- CLI workflow: `joshua run`, `joshua status`, `joshua doctor`, `joshua init`, `joshua examples`, `joshua explain`, `joshua tutorial`, `joshua evolve`, `joshua serve`, and more
 - HTTP control plane, process-based runtime, persistence, notifications, and restart recovery
 - Safety config with command/path allowlists, protected files, objective metrics, and explicit verdict policy wiring
 
@@ -362,19 +361,60 @@ cycle  verdict  duration_s  agents          confidence  metric_before  metric_af
 
 ## CLI
 
+### Onboarding
+
 ```bash
-joshua run config.yaml              # Run a sprint
-joshua run config.yaml -n 10        # Max 10 cycles
-joshua run config.yaml -H 96        # Max 96 hours
-joshua run config.yaml --dry-run    # Validate config only
-joshua run config.yaml --agents dev,qa   # Run only specific agents
-joshua status .joshua               # Status dashboard
-joshua status .joshua --watch       # Live-refresh dashboard (Ctrl+C to stop)
-joshua status .joshua -w -i 3       # Refresh every 3 seconds
-joshua replay config.yaml --cycle 7 # Re-run gate on saved cycle output
-joshua evolve config.yaml           # Run evolution + wiki maintenance
+joshua tutorial                         # Simulated sprint walkthrough — no API key needed
+joshua examples                         # List all built-in example configs with descriptions
+joshua examples python-api              # Copy a template to current directory
+joshua examples python-api --show       # Print template contents
+joshua init                             # Interactive setup wizard
+joshua init --template minimal          # Start from a built-in template
+joshua schema > joshua-schema.json      # Export JSON Schema for IDE YAML autocomplete
+joshua explain config.yaml              # Human-readable sprint plan + cost estimate
+joshua doctor config.yaml               # Pre-flight checks (Python, runner, git, path, creds)
 ```
 
+### Running
+
+```bash
+joshua run config.yaml                  # Run a sprint
+joshua run config.yaml -n 10            # Max 10 cycles
+joshua run config.yaml -H 96            # Max 96 hours
+joshua run config.yaml --dry-run        # Validate config only
+joshua run config.yaml --agents dev,qa  # Run only specific agents
+```
+
+### Monitoring
+
+```bash
+joshua status .joshua                   # Status dashboard
+joshua status .joshua --watch           # Live-refresh dashboard (Ctrl+C to stop)
+joshua status .joshua --json            # Machine-readable JSON (for CI: | jq .checkpoint.cycle)
+joshua logs .joshua                     # Print last 50 log lines
+joshua logs .joshua --follow            # Live tail (like tail -f)
+```
+
+### Analysis & export
+
+```bash
+joshua replay config.yaml --cycle 7    # Re-run gate on saved cycle output (no work agents)
+joshua export .joshua                   # Sprint report as Markdown (stdout)
+joshua export .joshua --format json     # Sprint report as JSON
+joshua export .joshua --cycles 5        # Last 5 cycles only
+joshua distill .joshua1 .joshua2        # Consolidate lessons across multiple sprints
+```
+
+### Automation
+
+```bash
+joshua fleet fleet.yaml                 # Run multiple projects from a YAML list
+joshua fleet fleet.yaml --dry-run       # Preview without running
+joshua serve                            # Start HTTP control plane (default: 127.0.0.1:8100)
+joshua serve --cert-file c.pem --key-file k.pem  # HTTPS
+joshua evolve config.yaml              # Run evolution + wiki maintenance
+joshua completion bash >> ~/.bashrc     # Shell completion (bash/zsh/fish)
+```
 
 > **Deploy safety**: `project.deploy` runs as a shell command with your user's permissions. Shell metacharacters (`;`, `|`, `` ` ``, `$(`) are rejected by config validation. Use dry-run mode (`joshua run config.yaml --dry-run`) to validate before running. Never use untrusted YAML configs.
 
@@ -452,8 +492,8 @@ joshua/
 Areas where help is needed:
 
 - **Runners**: Cursor, Windsurf, VS Code Copilot
-- **Trackers**: Linear, Notion, Trello
-- **Notifiers**: Discord, email, PagerDuty
+- **Trackers**: Notion, Trello (Linear and Jira/GitHub already supported)
+- **Notifiers**: PagerDuty (Telegram, Slack, Discord, email, webhook already supported)
 - **Skills**: share your custom skill templates
 
 ## License
