@@ -1,0 +1,27 @@
+# pre-commit hooks for joshua-agent
+# Install: pip install pre-commit && pre-commit install
+# Run manually: pre-commit run --all-files
+
+repos:
+  # ── Secret detection ──────────────────────────────────────────────────
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ["--baseline", ".secrets.baseline"]
+        exclude: "(tests/|examples/|CHANGELOG\\.md)"
+
+  # ── Syntax & undefined names (fast, no false positives) ───────────────
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.4.4
+    hooks:
+      - id: ruff
+        args: ["--select=E9,F63,F7,F82", "--fix"]
+
+  # ── Security SAST (medium+ severity, skip assert-in-test flag) ────────
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.7.8
+    hooks:
+      - id: bandit
+        args: ["-r", "joshua/", "-ll", "--skip", "B101", "-q"]
+        pass_filenames: false

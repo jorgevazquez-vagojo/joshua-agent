@@ -32,3 +32,25 @@ jobs:
 
       - name: Run tests
         run: pytest tests/ -q
+
+  security:
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5.4.0
+        with:
+          python-version: "3.12"
+
+      - name: Install project + security tools
+        run: pip install -e '.[server]' bandit pip-audit
+
+      - name: Dependency audit (CVEs)
+        run: pip-audit
+
+      - name: Static security analysis (bandit)
+        # -ll = medium+high severity only; skip test files
+        run: bandit -r joshua/ -ll --skip B101 --quiet
