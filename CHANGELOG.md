@@ -2,6 +2,15 @@
 
 All notable changes to joshua-agent are documented here.
 
+## [1.10.0] — 2026-04-08
+
+### Added
+- **`Dockerfile`**: production-ready multi-stage Docker image based on `python:3.12-slim`. Supports `INSTALL_LOCAL=1` build arg for local development and `JOSHUA_VERSION` for pinned releases. Runs as non-root user `joshua`. Includes `git` and `curl` system deps.
+- **`docker-compose.yaml`**: full-stack compose file with `joshua-server`, `joshua` runner (profile `run`), and `redis:7-alpine`. Server health-checks via `/health`. Redis health-checked with `redis-cli ping`. Volumes for persistent state.
+- **`.env.example`**: template for all environment variables — API keys, auth tokens, git integrations, database URL, and notification webhooks.
+- **`.dockerignore`**: excludes `.git`, `__pycache__`, `dist/`, `.env`, `.venv/`, `workspace/`, and logs from Docker build context.
+- **`joshua upgrade`**: new CLI command to self-update joshua-agent via PyPI. Checks current vs latest version, fetches and displays the relevant CHANGELOG section, prompts for confirmation, and runs `pip install --upgrade`. Supports `--check` (report only), `--yes` (skip prompt), and `--version` (pin to specific release).
+
 ## [1.9.0] — 2026-04-08
 
 ### Added

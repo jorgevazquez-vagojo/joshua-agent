@@ -4,7 +4,7 @@
 
 | Signal | Status |
 | --- | --- |
-| Package | `1.9.0` |
+| Package | `1.10.0` |
 | Tests | `344 pytest tests`; CI runs on Python `3.11`, `3.12`, `3.13` |
 | Release path | GitHub Actions CI + PyPI publish workflow |
 
@@ -109,6 +109,21 @@ joshua evolve config.yaml
 ```bash
 pip install joshua-agent
 ```
+
+## Docker
+
+```bash
+# Run a sprint in Docker
+docker run --rm -v $(pwd):/workspace \
+  -e ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY \
+  ghcr.io/jorgevazquez-vagojo/joshua-agent \
+  run sprint.yaml
+
+# Full stack (server + Redis)
+docker compose up
+```
+
+See `docker-compose.yaml` and `.env.example` for configuration.
 
 **Example 1 — Safe-by-default development sprint.** Start with a wrapper script you control. Keep build, tests, migrations, and health checks inside that script instead of wiring ad hoc shell directly into the first demo.
 

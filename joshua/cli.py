@@ -3870,5 +3870,109 @@ def explain(config: str, cycle: int):
     click.echo("")
 
 
+@main.command()
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+@click.option("--check", is_flag=True, help="Check for updates without installing")
+@click.option("--version", "target_version", default="", help="Install specific version")
+def upgrade(yes, check, target_version):
+    """Upgrade joshua-agent to the latest version.
+
+    Checks PyPI for the latest release, shows the changelog diff, and upgrades
+    with pip if confirmed.
+
+    \b
+    Example:
+      joshua upgrade
+      joshua upgrade --check
+      joshua upgrade --yes
+      joshua upgrade --version 1.8.0
+    """
+    import urllib.request
+    import json as _json
+
+    # Fetch latest version from PyPI
+    pypi_url = "https://pypi.org/pypi/joshua-agent/json"
+    try:
+        with urllib.request.urlopen(pypi_url, timeout=10) as resp:
+            data = _json.loads(resp.read().decode())
+        latest = data["info"]["version"]
+    except Exception as exc:
+        click.echo(f"Could not fetch version from PyPI: {exc}")
+        click.echo("Try manually: pip install --upgrade joshua-agent")
+        sys.exit(1)
+
+    current = __version__
+
+    # If a specific target version was requested, use it as the "latest"
+    if target_version:
+        latest = target_version
+
+    if current == latest:
+        click.echo(f"✓ Already on latest version ({current})")
+        return
+
+    if check:
+        click.echo(f"New version available: {current} → {latest}")
+        return
+
+    # Fetch and display changelog section for the new version
+    changelog_url = (
+        "https://raw.githubusercontent.com/jorgevazquez-vagojo/joshua-agent/main/CHANGELOG.md"
+    )
+    try:
+        with urllib.request.urlopen(changelog_url, timeout=10) as resp:
+            changelog_text = resp.read().decode()
+        # Extract section for the target version
+        lines = changelog_text.splitlines()
+        in_section = False
+        section_lines = []
+        for line in lines:
+            if line.startswith(f"## [{latest}]"):
+                in_section = True
+                section_lines.append(line)
+                continue
+            if in_section:
+                if line.startswith("## [") and not line.startswith(f"## [{latest}]"):
+                    break
+                section_lines.append(line)
+        if section_lines:
+            click.echo(f"\nChangelog for {latest}:")
+            click.echo("-" * 40)
+            for line in section_lines:
+                click.echo(line)
+            click.echo("-" * 40)
+        else:
+            click.echo(f"\nNew version available: {current} → {latest}")
+    except Exception:
+        click.echo(f"\nNew version available: {current} → {latest}")
+
+    if not yes:
+        confirmed = click.confirm(f"Upgrade to {latest}?", default=True)
+        if not confirmed:
+            click.echo("Upgrade cancelled.")
+            return
+
+    # Run pip upgrade
+    import subprocess as _subprocess
+
+    if target_version:
+        pkg = f"joshua-agent=={target_version}"
+    else:
+        pkg = "joshua-agent"
+
+    result = _subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--upgrade", pkg],
+        capture_output=True, text=True
+    )
+
+    if result.returncode == 0:
+        click.echo(f"✓ Upgraded to {latest}. Run 'joshua --version' to confirm.")
+    else:
+        click.echo("Upgrade failed. pip output:")
+        click.echo(result.stderr)
+        click.echo(f"\nTry manually: pip install --upgrade {pkg}")
+        sys.exit(1)
+
+
 if __name__ == "__main__":
     main()

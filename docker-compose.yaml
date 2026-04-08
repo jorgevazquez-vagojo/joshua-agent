@@ -1,0 +1,77 @@
+# joshua-agent — full stack: server + Redis + optional PostgreSQL
+# Usage:
+#   docker compose up           # start server
+#   docker compose run joshua joshua run sprint.yaml   # run a sprint
+#
+# Required env vars (copy .env.example to .env):
+#   ANTHROPIC_API_KEY, JOSHUA_AUTH_TOKEN
+
+services:
+  joshua-server:
+    build:
+      context: .
+      args:
+        INSTALL_LOCAL: "1"
+    image: joshua-agent:local
+    container_name: joshua-server
+    command: ["server", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - JOSHUA_AUTH_TOKEN=${JOSHUA_AUTH_TOKEN:-changeme}
+      - JOSHUA_TOKENS=${JOSHUA_TOKENS:-}
+      - JOSHUA_DB_URL=${JOSHUA_DB_URL:-redis://redis:6379/0}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GITLAB_TOKEN=${GITLAB_TOKEN:-}
+    volumes:
+      - ./workspace:/workspace
+      - joshua-data:/app/.joshua
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  joshua:
+    build:
+      context: .
+      args:
+        INSTALL_LOCAL: "1"
+    image: joshua-agent:local
+    container_name: joshua-runner
+    profiles: ["run"]   # Only starts with: docker compose --profile run up
+    volumes:
+      - ./workspace:/workspace
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GITLAB_TOKEN=${GITLAB_TOKEN:-}
+    working_dir: /workspace
+    # Override command: docker compose run joshua joshua run sprint.yaml
+
+  redis:
+    image: redis:7-alpine
+    container_name: joshua-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  joshua-data:
+  redis-data:
