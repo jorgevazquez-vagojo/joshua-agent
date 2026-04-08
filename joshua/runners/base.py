@@ -89,7 +89,11 @@ class LLMRunner(ABC):
             self._terminate_process(process)
 
     def _terminate_process(self, process: subprocess.Popen[str]):
-        """Terminate a running process, including its process group when possible."""
+        """Terminate a running process, including its process group when possible.
+
+        Sends SIGTERM first, waits up to 5 seconds for clean exit,
+        then escalates to SIGKILL to prevent zombie processes.
+        """
         if process.poll() is not None:
             return
         try:
@@ -101,6 +105,19 @@ class LLMRunner(ABC):
             return
         except OSError:
             process.terminate()
+
+        # Grace period: give the process 5 s to handle SIGTERM cleanly
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            # Process ignored SIGTERM — force-kill
+            try:
+                if os.name != "nt":
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:
+                    process.kill()
+            except (ProcessLookupError, OSError):
+                pass
 
     def _run_command(
         self,

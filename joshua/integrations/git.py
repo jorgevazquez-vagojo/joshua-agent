@@ -141,6 +141,23 @@ class GitOps:
             log.error(f"Reset failed: {e.stderr}")
             return False
 
+    def get_changed_files(self) -> list[str]:
+        """Return files modified since last commit (unstaged + staged diffs)."""
+        files: set[str] = set()
+        # Unstaged changes against HEAD
+        r1 = self._run("diff", "--name-only", "HEAD", check=False)
+        if r1.returncode == 0:
+            files.update(f for f in r1.stdout.strip().split("\n") if f)
+        # Staged changes
+        r2 = self._run("diff", "--name-only", "--cached", check=False)
+        if r2.returncode == 0:
+            files.update(f for f in r2.stdout.strip().split("\n") if f)
+        # Untracked files that are staged via 'git add'
+        r3 = self._run("ls-files", "--others", "--exclude-standard", check=False)
+        if r3.returncode == 0:
+            files.update(f for f in r3.stdout.strip().split("\n") if f)
+        return list(files)
+
     def push(self, remote: str = "origin", branch: str | None = None) -> bool:
         """Push to remote."""
         try:

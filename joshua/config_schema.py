@@ -36,6 +36,7 @@ class RunnerConfig(BaseModel):
     type: Literal["claude", "aider", "codex", "custom"] = "claude"
     timeout: int = Field(default=1800, ge=60, le=86400)
     requests_per_minute: int = Field(default=0, ge=0)
+    max_tokens_per_cycle: int = Field(default=0, ge=0)  # 0 = no limit; estimated output tokens
     model: Optional[str] = None
     binary: Optional[str] = None
     command: Optional[str] = None  # for custom runner

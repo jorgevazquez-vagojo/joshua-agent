@@ -4,9 +4,9 @@
 
 | Signal | Status |
 | --- | --- |
-| Package | `0.7.0` |
+| Package | `0.8.0` |
 | Repo | `50 commits` on `main` |
-| Tests | `301 pytest tests`; CI runs on Python `3.11`, `3.12`, `3.13` |
+| Tests | `303 pytest tests`; CI runs on Python `3.11`, `3.12`, `3.13` |
 | Release path | GitHub Actions CI + PyPI publish workflow |
 
 ## Demo

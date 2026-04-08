@@ -24,6 +24,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Depends, Header, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ValidationError, field_validator
@@ -101,6 +102,21 @@ app = FastAPI(
     description="Autonomous multi-agent sprint orchestration API",
     version=__version__,
     lifespan=lifespan,
+)
+
+# ── CORS ──────────────────────────────────────────────────────────────
+
+_ALLOWED_ORIGINS = [
+    o.strip()
+    for o in os.environ.get("JOSHUA_ALLOWED_ORIGINS", "").split(",")
+    if o.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_ALLOWED_ORIGINS or [],        # empty = no CORS headers (lockdown by default)
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["X-Internal-Token", "Content-Type"],
 )
 
 
