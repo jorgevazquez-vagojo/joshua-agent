@@ -1,4 +1,5 @@
 """CLI entry point for joshua-agent."""
+from __future__ import annotations
 
 import signal
 import sys
