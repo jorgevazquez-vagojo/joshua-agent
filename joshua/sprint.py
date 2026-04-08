@@ -600,9 +600,53 @@ class Sprint:
         # Accumulate token usage for cost estimation
         self.stats["total_tokens"] = self.stats.get("total_tokens", 0) + cycle_tokens
 
+        self._write_cycle_markdown(self.cycle, verdict, cycle_duration, cycle_tokens, work_outputs)
         self._run_hooks("post_cycle", {"JOSHUA_VERDICT": verdict})
         return verdict
 
+
+    def _write_cycle_markdown(
+        self, cycle: int, verdict: str, duration_s: float, tokens: int,
+        work_outputs: dict | None = None,
+    ) -> None:
+        """Write a Markdown summary + raw outputs JSON for this cycle.
+
+        Creates:
+          .joshua/cycles/cycle-NNNN.md   — human-readable summary
+          .joshua/cycles/cycle-NNNN.json — raw work-agent outputs (used by `joshua replay`)
+        """
+        try:
+            cycles_dir = self.state_dir / "cycles"
+            cycles_dir.mkdir(parents=True, exist_ok=True)
+
+            cost_usd = tokens / 1_000_000 * 3.0  # Sonnet output pricing: $3/MTok
+            findings_snippet = self.last_gate_findings[:800].strip()
+            lines = [
+                f"# Cycle {cycle} — {verdict}",
+                f"",
+                f"| Field | Value |",
+                f"|-------|-------|",
+                f"| Verdict | **{verdict}** |",
+                f"| Duration | {duration_s:.0f}s |",
+                f"| Tokens (est.) | {tokens:,} |",
+                f"| Cost (est.) | ${cost_usd:.4f} |",
+                f"| Confidence | {self.last_gate_confidence if self.last_gate_confidence is not None else '—'} |",
+                f"| Severity | {self.last_gate_severity} |",
+                f"| Timestamp | {datetime.now().isoformat()} |",
+                f"",
+                f"## Gate Findings",
+                f"",
+                findings_snippet if findings_snippet else "_No findings recorded._",
+            ]
+            (cycles_dir / f"cycle-{cycle:04d}.md").write_text("\n".join(lines) + "\n")
+
+            # Raw outputs JSON for `joshua replay`
+            if work_outputs:
+                (cycles_dir / f"cycle-{cycle:04d}.json").write_text(
+                    json.dumps({"cycle": cycle, "verdict": verdict, "work_outputs": work_outputs}, indent=2)
+                )
+        except Exception as e:
+            self.sprint_logger.debug(f"_write_cycle_markdown failed: {e}")
 
     def _run_metric(self) -> float | None:
         """Run objective_metric command, return numeric result or None on failure."""

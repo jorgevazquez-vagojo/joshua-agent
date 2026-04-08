@@ -2,6 +2,15 @@
 
 All notable changes to joshua-agent are documented here.
 
+## [0.9.0] — 2026-04-08
+
+### Added
+- **`--agents` filter** (`joshua run config.yaml --agents dev,qa`): comma-separated agent name filter; unknown names produce a clear error and exit. Useful for debugging a single agent without modifying the YAML.
+- **`joshua status --watch`** (`-w`/`--watch`, `-i`/`--interval`): live-refresh terminal dashboard using `click.clear()`. Defaults to 5s interval; `Ctrl+C` to stop.
+- **`joshua replay`** (`joshua replay config.yaml --cycle 7`): re-run gate agents on saved cycle outputs without running work agents. Reads `.joshua/cycles/cycle-NNNN.json` (raw outputs written each cycle); prints the new verdict + findings.
+- **Per-cycle Markdown summary** (`.joshua/cycles/cycle-NNNN.md`): human-readable summary written after each cycle — verdict, duration, estimated tokens and cost, confidence, severity, timestamp, and gate findings snippet. Also writes `cycle-NNNN.json` with raw work-agent outputs for `replay`.
+- **`task_source: github`** (`GitHubTaskSource`): fetches open GitHub issues via the REST API. Filters out PRs, supports label filtering, optional auth token for private repos. Registered as `"github"` in `task_source_factory`. Example config in README.
+
 ## [0.8.0] — 2026-04-08
 
 ### Security

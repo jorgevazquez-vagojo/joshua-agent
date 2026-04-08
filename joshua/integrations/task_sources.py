@@ -257,6 +257,87 @@ class GateTaskSource(TaskSource):
         return None
 
 
+class GitHubTaskSource(TaskSource):
+    """Fetch open issues from a GitHub repository.
+
+    Config:
+      repo:    owner/repo  (e.g. "acme/backend")
+      token:   GitHub personal access token (optional — for private repos / higher rate limit)
+      labels:  comma-separated label filter (e.g. "bug,help wanted")  optional
+      state:   "open" (default) | "closed" | "all"
+      max_results: max issues to consider per cycle (default 20)
+
+    Example YAML:
+      task_source: github
+      task_source_config:
+        repo: acme/backend
+        token: ${GITHUB_TOKEN}
+        labels: "bug"
+    """
+
+    _API_BASE = "https://api.github.com"
+
+    def __init__(self, config: dict):
+        self.repo = config.get("repo", "").strip("/")
+        self.token = config.get("token", "")
+        self.labels = config.get("labels", "")
+        self.state = config.get("state", "open")
+        self.max_results = int(config.get("max_results", 20))
+        if not self.repo:
+            raise ValueError("GitHubTaskSource requires 'repo' (owner/repo)")
+
+    def _headers(self) -> dict:
+        h = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
+        if self.token:
+            h["Authorization"] = f"Bearer {self.token}"
+        return h
+
+    def _fetch_issues(self) -> list[dict]:
+        params = f"state={self.state}&per_page={self.max_results}"
+        if self.labels:
+            params += f"&labels={urllib.parse.quote(self.labels)}"
+        url = f"{self._API_BASE}/repos/{self.repo}/issues?{params}"
+        req = urllib.request.Request(url, headers=self._headers())
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                issues = json.loads(resp.read())
+                # GitHub issues API returns PRs too — filter them out
+                return [i for i in issues if "pull_request" not in i]
+        except Exception as e:
+            log.warning(f"GitHubTaskSource: fetch failed for {self.repo}: {e}")
+            return []
+
+    def has_tasks(self) -> bool:
+        return len(self._fetch_issues()) > 0
+
+    def get_task(self, agent_name: str, cycle: int) -> TaskFetchResult | None:
+        issues = self._fetch_issues()
+        if not issues:
+            log.info(f"[{agent_name}] No GitHub issues found in {self.repo}, using static fallback")
+            return None
+
+        issue = issues[(cycle - 1) % len(issues)]
+        number = issue.get("number", "")
+        title = issue.get("title", "")
+        body = (issue.get("body") or "")[:3000]
+        labels = ", ".join(lb["name"] for lb in issue.get("labels", []))
+
+        parts = [f"GitHub #{number}: {title}"]
+        if labels:
+            parts.append(f"Labels: {labels}")
+        if body.strip():
+            parts.append(f"\nDescription:\n{body}")
+
+        task = "\n".join(parts)
+        log.info(f"[{agent_name}] GitHub issue fetched: #{number} — {title[:60]}")
+
+        return TaskFetchResult(
+            task=task,
+            source_id=f"gh-{number}",
+            metadata={"number": number, "title": title, "labels": labels},
+        )
+
+
 class NullTaskSource(TaskSource):
     """No-op — always returns None (use static tasks)."""
 
@@ -273,4 +354,6 @@ def task_source_factory(source_type: str, config: dict) -> TaskSource:
         return JiraTaskSource(config)
     if source_type == "gate":
         return GateTaskSource(config)
+    if source_type == "github":
+        return GitHubTaskSource(config)
     return NullTaskSource()

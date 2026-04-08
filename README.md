@@ -4,7 +4,7 @@
 
 | Signal | Status |
 | --- | --- |
-| Package | `0.8.0` |
+| Package | `0.9.0` |
 | Repo | `50 commits` on `main` |
 | Tests | `303 pytest tests`; CI runs on Python `3.11`, `3.12`, `3.13` |
 | Release path | GitHub Actions CI + PyPI publish workflow |
@@ -78,6 +78,11 @@ Results are stored in the `.joshua/` directory alongside your project:
 ```
 .joshua/
 ├── checkpoint.json     Current cycle number, last verdict, error counts
+├── results.tsv         One row per cycle — verdict, duration, confidence, description
+├── cycles/             Per-cycle Markdown summaries + raw outputs (for replay)
+│   ├── cycle-0001.md   Human-readable summary: verdict, cost, gate findings
+│   └── cycle-0001.json Raw work-agent outputs (used by `joshua replay`)
+├── events/             Structured JSON events per cycle
 ├── lessons/            One file per cycle — raw lessons extracted from agent output
 └── wiki/               Curated knowledge entries built from accumulated lessons
 ```
@@ -304,7 +309,46 @@ tracker:
 memory:
   enabled: true
   state_dir: .joshua
+  max_lesson_age_cycles: 50     # Filter lessons older than N cycles from prompts
+
+runner:
+  max_tokens_per_cycle: 50000   # Stop adding work agents if estimated tokens exceed this (0 = off)
 ```
+
+### Dynamic task sources
+
+Agents can pull tasks from external systems instead of a static YAML list:
+
+```yaml
+agents:
+  dev:
+    skill: dev
+    task_source: github           # or: jira | gate
+    task_source_config:
+      repo: acme/backend          # owner/repo
+      token: ${GITHUB_TOKEN}      # optional — for private repos / higher rate limit
+      labels: "bug,help wanted"   # optional label filter
+      max_results: 20             # issues to consider per cycle
+
+  qa:
+    skill: qa
+    task_source: jira
+    task_source_config:
+      base_url: https://company.atlassian.net
+      user: ${JIRA_USER}
+      token: ${JIRA_TOKEN}
+      jql: "project = PROJ AND type = Bug AND resolution = Unresolved"
+
+  fixer:
+    skill: dev
+    task_source: gate             # Use top issue from last gate findings as task
+```
+
+| Source | Description |
+|--------|-------------|
+| `github` | Open issues from a GitHub repo (filters out PRs, round-robin by cycle) |
+| `jira` | Issues from a Jira JQL query (requires HTTPS) |
+| `gate` | Generates task from last gate verdict's top finding (REVERT/CAUTION → resolves issues) |
 
 Template variables available in agent prompts: `{agent_name}`, `{skill}`, `{project_name}`, `{project_dir}`, `{deploy_command}` (from `project.deploy`), `{program}` (from top-level `program:`), `{memory}`, `{wiki}`, `{gate_findings}`, `{max_changes}`.
 
@@ -323,7 +367,11 @@ joshua run config.yaml              # Run a sprint
 joshua run config.yaml -n 10        # Max 10 cycles
 joshua run config.yaml -H 96        # Max 96 hours
 joshua run config.yaml --dry-run    # Validate config only
+joshua run config.yaml --agents dev,qa   # Run only specific agents
 joshua status .joshua               # Status dashboard
+joshua status .joshua --watch       # Live-refresh dashboard (Ctrl+C to stop)
+joshua status .joshua -w -i 3       # Refresh every 3 seconds
+joshua replay config.yaml --cycle 7 # Re-run gate on saved cycle output
 joshua evolve config.yaml           # Run evolution + wiki maintenance
 ```
 
