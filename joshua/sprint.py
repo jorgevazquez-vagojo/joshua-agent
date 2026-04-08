@@ -33,6 +33,9 @@ from joshua.utils.health import check_health
 from joshua.utils.redact import redact_secrets
 from joshua.utils.safe_cmd import run_command
 from joshua.utils.preflight import run_preflight, check_memory, wait_for_memory
+from joshua.utils.scratchpad import clear_scratchpad, scratchpad_summary, write_scratchpad
+from joshua.utils.handoff import HandoffContext
+from joshua.utils.tool_check import check_tools
 from joshua.gate_contract import GateVerdict, GATE_JSON_SCHEMA
 
 log = logging.getLogger("joshua")
@@ -509,6 +512,10 @@ class Sprint:
 
         context = self._build_context()
 
+        # v1.14.0: clear scratchpad at cycle start and create handoff context
+        clear_scratchpad(self.project_dir)
+        handoff = HandoffContext(cycle=self.cycle, project=self.project_name)
+
         # Phase 1: Run all work skills
         work_outputs: dict = {}
         cycle_tokens = 0
@@ -517,9 +524,43 @@ class Sprint:
         def _run_work_agent(agent, i: int) -> None:
             if i > 0 and not self.parallel_agents:
                 self._stagger_wait(agent.name)
+
+            # v1.14.0: tool check before launching agent
+            agent_conf = self.config.get("agents", {}).get(agent.name, {})
+            tools = agent_conf.get("tools", []) if isinstance(agent_conf, dict) else []
+            if tools:
+                tool_result = check_tools(tools)
+                if not tool_result.ok:
+                    self.sprint_logger.warning(
+                        f"[{agent.name}] Missing tools: {tool_result.missing} — skipping agent"
+                    )
+                    with _tokens_lock:
+                        work_outputs[agent.name] = (
+                            f"[SKIPPED] Agent requires tools not available: {tool_result.missing}"
+                        )
+                    return
+
             task = agent.get_task(self.cycle)
+
+            # v1.14.0: inject scratchpad context and handoff into task prompt
+            scratchpad_ctx = scratchpad_summary(self.project_dir)
+            handoff_ctx = handoff.to_prompt_section()
+            extra_ctx = "\n\n".join(filter(None, [scratchpad_ctx, handoff_ctx]))
+            if extra_ctx:
+                task = f"{task}\n\n{extra_ctx}"
+
             self.sprint_logger.info(f"[{agent.name}] ({agent.skill}) Task: {task[:80]}")
             result = self._run_agent_with_retry(agent, task, context)
+
+            # v1.14.0: parse JSON_OUTPUT block if agent uses output_format=json
+            if isinstance(agent_conf, dict) and agent_conf.get("output_format") == "json":
+                result = self._parse_structured_output(agent.name, result)
+
+            # v1.14.0: write scratchpad entry from agent output
+            self._maybe_write_scratchpad(agent.name, result.output)
+
+            # v1.14.0: update handoff context with this agent's result
+            handoff.add_agent_result(agent.name, result)
 
             output = result.output if result.success else f"[FAILED] {result.error}"
             violations = self._check_protected_files(agent.name)
@@ -527,6 +568,11 @@ class Sprint:
                 output += (
                     f"\n\n[PROTECTED FILE VIOLATION] Agent touched restricted files: "
                     f"{violations}. These changes will be flagged for gate review."
+                )
+
+            if result.killed_by_token_limit:
+                self.sprint_logger.warning(
+                    f"[{agent.name}] Killed by token limit — output may be incomplete"
                 )
 
             with _tokens_lock:
@@ -960,6 +1006,24 @@ class Sprint:
         system_prompt = agent.build_system_prompt(ctx)
         user_prompt = agent.build_task_prompt(task, self.cycle, ctx)
 
+        # v1.14.0: append JSON output instruction if agent uses output_format=json
+        agent_conf = self.config.get("agents", {}).get(agent.name, {})
+        output_format = (
+            agent_conf.get("output_format", "text") if isinstance(agent_conf, dict) else "text"
+        )
+        if output_format == "json":
+            user_prompt += (
+                '\n\nIMPORTANT: Your final output MUST be a valid JSON object matching this schema:'
+                '\n{"status": "success|partial|failed", "summary": "...", "files_changed": [...],'
+                ' "tests_passed": true/false, "tests_count": N, "issues_found": [...], "confidence": 0.0-1.0}'
+                '\nOutput ONLY the JSON object as the last thing you write, preceded by the line: JSON_OUTPUT:'
+            )
+
+        # v1.14.0: per-agent token limit
+        max_tokens = (
+            agent_conf.get("max_tokens_per_run", 0) if isinstance(agent_conf, dict) else 0
+        )
+
         result = self.runner.run(
             prompt=user_prompt,
             cwd=self.project_dir,
@@ -967,11 +1031,50 @@ class Sprint:
             timeout=self.runner.timeout,
         )
 
+        # v1.14.0: enforce max_tokens_per_run (post-run check on estimated tokens)
+        if max_tokens > 0 and result.tokens_out > max_tokens:
+            log.warning(
+                f"[{agent.name}] Token limit exceeded: {result.tokens_out} > {max_tokens} "
+                f"(estimated). Marking as killed_by_token_limit."
+            )
+            result.killed_by_token_limit = True
+
         log.info(
             f"[{agent.name}] {'OK' if result.success else 'FAIL'} "
             f"({result.duration_seconds}s, {len(result.output)} chars)"
         )
         return result
+
+    def _parse_structured_output(self, agent_name: str, result: RunResult) -> RunResult:
+        """Parse JSON_OUTPUT block from agent output (v1.14.0 typed output)."""
+        match = re.search(r"JSON_OUTPUT:\s*(\{.*\})", result.output, re.DOTALL)
+        if match:
+            try:
+                result.structured_output = json.loads(match.group(1))
+                log.debug(f"[{agent_name}] Structured output parsed OK")
+            except json.JSONDecodeError as e:
+                log.warning(f"[{agent_name}] JSON_OUTPUT parse failed: {e}")
+        else:
+            log.warning(f"[{agent_name}] output_format=json but no JSON_OUTPUT block found")
+        return result
+
+    def _maybe_write_scratchpad(self, agent_name: str, output: str) -> None:
+        """Parse SCRATCHPAD: block from agent output and persist it (v1.14.0)."""
+        match = re.search(r"SCRATCHPAD:\s*\n((?:[ \t]+\S.*\n?)+)", output)
+        if not match:
+            return
+        data: dict = {}
+        for line in match.group(1).splitlines():
+            line = line.strip()
+            if ":" in line:
+                key, _, value = line.partition(":")
+                data[key.strip()] = value.strip()
+        if data:
+            try:
+                write_scratchpad(self.project_dir, agent_name, data)
+                log.debug(f"[{agent_name}] Scratchpad written: {list(data.keys())}")
+            except Exception as e:
+                log.warning(f"[{agent_name}] Scratchpad write failed: {e}")
 
     def _record_result(self, agent: Agent, task: str, result: RunResult):
         """Save lessons and raw output after an agent run."""

@@ -4,6 +4,18 @@ import re
 from typing import Any, Dict, Literal, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+# Known tools: maps logical tool name → list of CLI commands (any match = available).
+# Empty list means always available (Python built-in or no external binary needed).
+KNOWN_TOOLS: dict[str, list[str]] = {
+    "run_tests": ["pytest", "python -m pytest", "npm test", "cargo test"],
+    "git_diff": ["git"],
+    "read_file": [],  # always available (Python built-in)
+    "lint": ["ruff", "eslint", "flake8"],
+    "docker": ["docker"],
+    "npm": ["npm"],
+    "cargo": ["cargo"],
+}
+
 
 class ProjectConfig(BaseModel):
     name: str
@@ -51,6 +63,16 @@ class RunnerConfig(BaseModel):
         return self
 
 
+class AgentOutputSchema(BaseModel):
+    status: str = "success"
+    summary: str = ""
+    files_changed: list[str] = Field(default_factory=list)
+    tests_passed: bool | None = None
+    tests_count: int = 0
+    issues_found: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+
+
 class AgentConfig(BaseModel):
     skill: str = ""
     role: str = ""  # legacy alias for skill
@@ -61,6 +83,22 @@ class AgentConfig(BaseModel):
     backstory: str = Field(
         default="",
         description="Agent backstory injected into prompt for behavioral consistency"
+    )
+    # v1.14.0: tool declarations, typed output, token interrupts
+    tools: list[str] = Field(
+        default_factory=list,
+        description="Required tools verified before run (see KNOWN_TOOLS)"
+    )
+    output_format: str = Field(
+        default="text",
+        pattern="^(text|json)$",
+        description="Output format: 'text' (default) or 'json' for structured output"
+    )
+    output_schema: AgentOutputSchema | None = None
+    max_tokens_per_run: int = Field(
+        default=0,
+        ge=0,
+        description="Max output tokens per run (0 = unlimited). Kills agent if exceeded."
     )
 
     @model_validator(mode="after")

@@ -2,6 +2,19 @@
 
 All notable changes to joshua-agent are documented here.
 
+## [1.14.0] — 2026-04-08
+
+### Added
+- **Scratchpad compartido (MEJORA 1)**: nuevo módulo `joshua/utils/scratchpad.py`. Al inicio de cada ciclo se limpia `cycle_context.json`. Cada agente puede escribir un bloque `SCRATCHPAD:` en su output que el orquestador parsea y persiste. El siguiente agente recibe el resumen vía `scratchpad_summary()` inyectado al final de su task prompt.
+- **Output tipado del subagente (MEJORA 2)**: `AgentConfig` añade `output_format: "text"|"json"`, `output_schema` y `AgentOutputSchema`. Si `output_format="json"`, el task prompt incluye instrucciones para emitir un bloque `JSON_OUTPUT:`. El sprint parsea el bloque y guarda el resultado en `RunResult.structured_output`.
+- **Handoff estructurado (MEJORA 3)**: nuevo módulo `joshua/utils/handoff.py` con `HandoffContext`. Se crea al inicio de cada ciclo; después de cada agente de trabajo se registra su resultado. El siguiente agente recibe el contexto formateado como sección del prompt.
+- **Tool use declarativo (MEJORA 4)**: `AgentConfig` añade campo `tools: list[str]`. Nuevo módulo `joshua/utils/tool_check.py` con `check_tools()`. Antes de lanzar cada agente, el orquestador verifica disponibilidad; si faltan herramientas, el agente se omite con warning.
+- **Interrupciones por tokens (MEJORA 5)**: `AgentConfig` añade `max_tokens_per_run: int` (0 = ilimitado). Tras cada ejecución, si los tokens estimados superan el límite, se registra `RunResult.killed_by_token_limit = True` y se emite warning.
+- **`RunResult` ampliado**: nuevos campos `structured_output: dict | None` y `killed_by_token_limit: bool`.
+- **`KNOWN_TOOLS`**: diccionario en `config_schema.py` que mapea nombres lógicos de herramientas a comandos CLI verificables.
+
+> Nota: se salta la versión 1.13.0 intencionalmente.
+
 ## [1.12.0] — 2026-04-08
 
 ### Added

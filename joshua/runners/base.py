@@ -29,6 +29,8 @@ class RunResult:
     metadata: dict = field(default_factory=dict)
 
     tokens_out: int = 0  # estimated output tokens (len(output) // 4)
+    structured_output: dict | None = None  # parsed JSON output when output_format=="json"
+    killed_by_token_limit: bool = False    # True if agent was killed by max_tokens_per_run
 
     def __bool__(self) -> bool:
         return self.success
