@@ -1,5 +1,7 @@
 """Agent self-learning: extract lessons from run output, build memory prompts."""
 
+from __future__ import annotations
+
 import json
 import logging
 from pathlib import Path

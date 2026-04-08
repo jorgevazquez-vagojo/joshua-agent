@@ -1,18 +1,18 @@
 """Pydantic schema for joshua-agent YAML config validation."""
 from __future__ import annotations
-
 import re
-from typing import Literal
-
+from typing import Any, Dict, Literal, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ProjectConfig(BaseModel):
     name: str
     path: str
-    site_url: str = ""  # Live URL for researcher agents (e.g., https://primor.eu)
-
-    model_config = {"extra": "allow"}
+    deploy: str = ""              # Shell command to deploy on GO verdict
+    health_url: str = ""          # HTTP endpoint for health checks
+    objective_metric: str = ""    # Shell command that prints a number (lower = better)
+    protected_files: list[str] = Field(default_factory=list)  # Globs agents must not modify
+    site_url: str = ""             # Live URL for researcher agents (e.g., https://primor.eu)
 
     @field_validator("path")
     @classmethod
@@ -21,14 +21,24 @@ class ProjectConfig(BaseModel):
             raise ValueError("project.path cannot be empty")
         return v
 
+    @field_validator("deploy", "objective_metric", mode="before")
+    @classmethod
+    def no_shell_injection_deploy(cls, v: str) -> str:
+        if v and re.search(r"[;&|`\n\r]|\$[\({a-zA-Z]", v):
+            raise ValueError(
+                "Command contains shell metacharacters ($VAR, pipes, semicolons, "
+                "backticks, newlines). Use a wrapper script instead."
+            )
+        return v
+
 
 class RunnerConfig(BaseModel):
     type: Literal["claude", "aider", "codex", "custom"] = "claude"
     timeout: int = Field(default=1800, ge=60, le=86400)
     requests_per_minute: int = Field(default=0, ge=0)
-    model: str | None = None
-    binary: str | None = None
-    command: str | None = None  # for custom runner
+    model: Optional[str] = None
+    binary: Optional[str] = None
+    command: Optional[str] = None  # for custom runner
 
     @model_validator(mode="after")
     def custom_requires_command(self) -> RunnerConfig:
@@ -41,6 +51,8 @@ class AgentConfig(BaseModel):
     skill: str = ""
     role: str = ""  # legacy alias for skill
     instructions: str = ""
+    task_source: Optional[str] = None  # "jira" | None — dynamic task fetching
+    task_source_config: dict = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def skill_or_role(self) -> AgentConfig:
@@ -57,74 +69,24 @@ class SprintConfig(BaseModel):
     max_hours: float = Field(default=0.0, ge=0.0)
     max_backoff: int = Field(default=900, ge=10, le=3600)
     health_check_max_failures: int = Field(default=3, ge=1)
-    dry_run: bool = False
-    deploy_command: str = ""
-    revert_command: str = ""
-    health_check_command: str = ""
-    verdict_policy: dict[str, str] = Field(
-        default_factory=lambda: {
-            "GO": "deploy",
-            "CAUTION": "deploy_with_warning",
-            "REVERT": "revert",
-        }
-    )
+    cycle_sleep: int = Field(default=300, ge=0)
+    revert_sleep: int = Field(default=0, ge=0)  # 0 = use cycle_sleep
+    health_check: bool = False
+    recovery_deploy: str = ""
+    gate_blocking: bool = False
+    cross_agent_context: bool = False
+    git_strategy: Literal["none", "snapshot", "hillclimb"] = "none"
+    trigger: Literal["continuous", "event", "on_demand"] = "continuous"
+    poll_interval: int = Field(default=300, ge=30)  # seconds between polls in event mode
 
-    @field_validator("deploy_command", "revert_command", "health_check_command", mode="before")
+    @field_validator("recovery_deploy", mode="before")
     @classmethod
     def no_shell_injection(cls, v: str) -> str:
-        if v and re.search(r"[;&|`]|\$\(", v):
+        if v and re.search(r"[;&|`\n\r]|\$[\({a-zA-Z]", v):
             raise ValueError(
-                "Command contains shell metacharacters. Use a script file instead."
+                "Command contains shell metacharacters. Use a wrapper script instead."
             )
         return v
-
-    @model_validator(mode="after")
-    def validate_verdict_policy(self) -> SprintConfig:
-        valid_verdicts = {"GO", "CAUTION", "REVERT"}
-        valid_actions = {"deploy", "deploy_with_warning", "revert", "skip", "stop"}
-        invalid_keys = [key for key in self.verdict_policy if key not in valid_verdicts]
-        invalid_values = [value for value in self.verdict_policy.values() if value not in valid_actions]
-        if invalid_keys:
-            raise ValueError(
-                "sprint.verdict_policy keys must be one of GO, CAUTION, REVERT"
-            )
-        if invalid_values:
-            raise ValueError(
-                "sprint.verdict_policy values must be one of "
-                f"{sorted(valid_actions)}"
-            )
-        return self
-
-    cycle_delay: int = Field(default=0, ge=0)
-
-
-class SafetyConfig(BaseModel):
-    allowed_commands: list[str] = Field(default_factory=list)
-    allowed_paths: list[str] = Field(default_factory=list)
-    approval_command: str = ""
-    approval_required_actions: list[str] = Field(default_factory=list)
-
-    @field_validator("allowed_commands", "allowed_paths", "approval_required_actions", mode="before")
-    @classmethod
-    def normalize_lists(cls, value):
-        if value is None:
-            return []
-        return value
-
-    @model_validator(mode="after")
-    def validate_policy(self) -> SafetyConfig:
-        valid_actions = {"deploy", "revert", "recovery_deploy"}
-        invalid = [action for action in self.approval_required_actions if action not in valid_actions]
-        if invalid:
-            raise ValueError(
-                "safety.approval_required_actions must only contain "
-                f"{sorted(valid_actions)}"
-            )
-        if self.approval_required_actions and not self.approval_command:
-            raise ValueError(
-                "safety.approval_command is required when approval_required_actions is set"
-            )
-        return self
 
 
 class MemoryConfig(BaseModel):
@@ -141,14 +103,27 @@ class NotificationsConfig(BaseModel):
     url: str = ""
 
 
+class PreflightConfig(BaseModel):
+    min_disk_gb: int = Field(default=0, ge=0)
+    min_memory_gb: int = Field(default=0, ge=0)
+    memory_wait_timeout: int = Field(default=120, ge=0)
+    docker_cleanup: bool = False
+
+
+class TrackerConfig(BaseModel):
+    type: Literal["none", "jira", "github", "filesystem"] = "none"
+    model_config = {"extra": "allow"}  # tracker-specific fields (base_url, project_key, etc.)
+
+
 class JoshuaConfig(BaseModel):
     project: ProjectConfig
     runner: RunnerConfig = Field(default_factory=RunnerConfig)
     agents: dict[str, AgentConfig]
     sprint: SprintConfig = Field(default_factory=SprintConfig)
-    safety: SafetyConfig = Field(default_factory=SafetyConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
+    preflight: PreflightConfig = Field(default_factory=PreflightConfig)
+    tracker: TrackerConfig = Field(default_factory=TrackerConfig)
 
     @field_validator("agents")
     @classmethod
@@ -157,4 +132,4 @@ class JoshuaConfig(BaseModel):
             raise ValueError("at least one agent must be defined")
         return v
 
-    model_config = {"extra": "allow"}  # allow unknown top-level keys for forward compat
+    model_config = {"extra": "ignore"}  # silently drop unknown top-level keys

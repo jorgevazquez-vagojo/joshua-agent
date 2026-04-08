@@ -1,0 +1,36 @@
+# joshua-agent demo — FastAPI Task Manager
+# Agents named after WarGames characters:
+#   Falken (dev), Jennifer (bug-hunter), McKittrick (qa gate)
+
+project:
+  name: task-manager-api
+  path: /tmp/joshua-demo
+
+runner:
+  type: custom
+  command: "bash /tmp/joshua-demo/mock-runner.sh {prompt_file}"
+  timeout: 60
+
+agents:
+  falken:
+    skill: dev
+    tasks:
+      - "Fix SQL injection in all endpoints using parameterized queries"
+      - "Refactor authentication middleware for cleaner session handling"
+  jennifer:
+    skill: bug-hunter
+    tasks:
+      - "Find and fix hardcoded secrets and missing input validation"
+      - "Scan for connection leaks and missing error handling"
+  mckittrick:
+    skill: qa
+
+sprint:
+  max_cycles: 2
+  cycle_sleep: 1
+  gate_blocking: true
+  cross_agent_context: true
+  git_strategy: none
+
+memory:
+  enabled: false

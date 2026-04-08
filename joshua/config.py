@@ -1,5 +1,7 @@
 """Configuration loader with YAML + ${ENV_VAR} interpolation."""
 
+from __future__ import annotations
+
 import os
 import re
 from pathlib import Path
@@ -14,8 +16,15 @@ from joshua.config_schema import JoshuaConfig
 _ENV_PATTERN = re.compile(r"\$\{(\w+)(?::([^}]*))?\}")
 
 
+_DANGEROUS_DEFAULT = re.compile(r"[;&|`\n\r]|\$[\({a-zA-Z]")
+
+
 def _interpolate_env(value: str) -> str:
-    """Replace ${VAR} or ${VAR:default} with environment variable values."""
+    """Replace ${VAR} or ${VAR:default} with environment variable values.
+
+    Default values are checked for shell metacharacters to prevent injection
+    via crafted configs (e.g. ${MISSING:rm -rf /}).
+    """
     def _replace(match):
         var_name = match.group(1)
         default = match.group(2)
@@ -23,6 +32,11 @@ def _interpolate_env(value: str) -> str:
         if val is not None:
             return val
         if default is not None:
+            if _DANGEROUS_DEFAULT.search(default):
+                raise ValueError(
+                    f"${{{var_name}}} default value contains shell metacharacters: "
+                    f"'{default[:50]}'. Use a safe literal or set the env var."
+                )
             return default
         return match.group(0)  # leave as-is if not found and no default
 

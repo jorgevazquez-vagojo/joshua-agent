@@ -4,9 +4,9 @@
 
 | Señal | Estado |
 | --- | --- |
-| Paquete | `0.6.0` |
-| Repo | `27 commits` en `main` |
-| Tests | `262 tests de pytest`; CI en Python `3.11`, `3.12`, `3.13` |
+| Paquete | `0.6.1` |
+| Repo | `50 commits` en `main` |
+| Tests | `301 tests de pytest`; CI en Python `3.11`, `3.12`, `3.13` |
 | Release path | GitHub Actions CI + workflow de publicación a PyPI |
 
 ## Demo
@@ -24,6 +24,23 @@ La idea: define un equipo de agentes IA como **skills** en YAML, apúntalos a un
 Nombrado como la IA de WarGames que aprendió que la única jugada ganadora es seguir jugando.
 
 ```
+
+## Estado actual
+
+**Estable**
+
+- Sprints multiagente definidos en YAML con fases `work` y `gate`
+- Bucle de veredictos `GO` / `CAUTION` / `REVERT` con estrategias git `snapshot` o `hillclimb`
+- Flujo CLI: `joshua run`, `joshua status`, `joshua evolve`, `joshua serve`
+- Plano de control HTTP, runtime basado en procesos, persistencia, notificaciones y recuperación tras reinicio
+- Configuración de seguridad con allowlists de comandos/rutas, archivos protegidos, métricas objetivas y políticas explícitas por veredicto
+
+**Experimental**
+
+- Despliegues desatendidos sobre infraestructura de producción real
+- Calidad de la wiki autoaprendida y evolución de prompts en sprints largos
+- Modos `event` y `on_demand` cuando dependen de task sources y hooks propios
+- Runners custom y cadenas de hooks que ejecutan shell arbitrario
  Skills de trabajo          Skills de puerta
 +--------------+          +----------+
 | Dev          |          |          |
@@ -34,23 +51,6 @@ Nombrado como la IA de WarGames que aprendió que la única jugada ganadora es s
        ^                       |
        +---- siguiente ciclo --+
 ```
-
-## Estado actual
-
-**Estable**
-
-- Sprints multiagente definidos en YAML con fases `work` y `gate`
-- Bucle de puerta `GO` / `CAUTION` / `REVERT` con estrategias git de snapshot/revert
-- Flujo CLI: `joshua run`, `joshua status`, `joshua evolve`
-- Abstracción de runners para Claude Code, Codex, Aider y CLIs custom
-- Plano de control HTTP, notificaciones, checkpoints y logs por ciclo
-
-**Experimental**
-
-- Despliegues desatendidos sobre infraestructura de producción real
-- Calidad de la wiki autoaprendida y evolución de prompts en sprints largos
-- Dominios no software que necesiten prompts, políticas y scripts wrapper propios
-- Runners custom que ejecuten comandos shell arbitrarios
 
 ## Cómo funciona
 
@@ -204,6 +204,14 @@ Sleeping 600s before next cycle...
 
 **Planificación consciente de recursos.** Cada agente LLM consume memoria significativa. Ejecutar múltiples sprints en la misma máquina puede provocar OOM kills (lo aprendimos por las malas). `min_memory_gb` comprueba la RAM disponible antes de cada ejecución de agente — si la memoria es baja, joshua-agent espera en vez de crashear. `agent_stagger` añade un retardo fijo entre ejecuciones de agentes para dejar que el sistema respire. Juntos, permiten ejecutar múltiples sprints de forma segura en un solo servidor.
 
+**Métricas objetivas.** Los agentes de puerta son buenos en revisión cualitativa, pero no reemplazan a un test suite. `project.objective_metric` define un comando shell que devuelve un número (menor = mejor). joshua-agent lo ejecuta antes y después de los agentes de trabajo, inyecta el delta en el prompt de la puerta, y registra ambos valores en `results.tsv`. La puerta ahora tiene datos duros junto a su juicio cualitativo. Piensa en `pytest --tb=no -q`, un script de benchmark, o cualquier comando que imprima un número.
+
+**Archivos protegidos.** `project.protected_files` lista globs que los agentes de trabajo no deben modificar. La instrucción se inyecta directamente en el prompt de tarea: "DO NOT modify: tests/\*\*, eval.py". Esto evita que los agentes "engañen" a la métrica editando la evaluación o el harness de tests — el mismo patrón que Karpathy usa en autoresearch donde `prepare.py` es read-only.
+
+**Estrategia git hillclimb.** `git_strategy: hillclimb` convierte git en un checkpoint de hill-climbing. Antes de cada ciclo, joshua-agent commitea el estado actual. Después de que los agentes trabajen y la puerta revise, un veredicto `REVERT` dispara `git reset --hard` al checkpoint. Un veredicto `GO` conserva el commit. El resultado: cada commit superviviente en el historial git es una mejora verificada. Comparado con `snapshot`, que crea ramas por ciclo, hillclimb es más simple y produce un historial lineal.
+
+**Tres modos de trigger.** `sprint.trigger` controla cuándo se ejecutan los ciclos. `continuous` (por defecto) ejecuta ciclos continuamente con `cycle_sleep` entre ellos — ideal para mejora proactiva. `event` consulta los task sources (Jira, GitHub) cada `poll_interval` segundos y solo ejecuta un ciclo cuando hay trabajo real — sin tareas, sin llamadas a Claude, sin tokens quemados. `on_demand` espera un trigger externo vía API (`trigger_cycle()`) — útil para integración CI/CD donde un deploy o PR dispara una revisión.
+
 ## Runners soportados
 
 | Runner | Comando | Instalación |
@@ -219,8 +227,19 @@ Sleeping 600s before next cycle...
 project:
   name: mi-proyecto
   path: ~/mi-proyecto              # Cualquier carpeta — código, docs, informes, datos
-  deploy: "./deploy.sh"            # Opcional — mejor detrás de un wrapper que controles
+  deploy: "bash deploy.sh"         # Opcional — omitir para sprints sin código
   health_url: http://localhost:3000/health  # Opcional
+  objective_metric: "pytest --tb=no -q | tail -1"  # Comando que imprime un número (menor = mejor)
+  protected_files:                  # Globs que los agentes NO deben modificar
+    - "tests/**"
+    - "eval.py"
+
+program: |                          # Opcional — contexto compartido para TODOS los agentes
+  ## Objetivo
+  Reducir latencia p95 por debajo de 200ms.
+  ## Restricciones
+  - NO modificar el esquema de base de datos
+  - Solo editar archivos en src/api/
 
 runner:
   type: claude                  # claude | codex | aider | custom
@@ -229,7 +248,7 @@ runner:
 
 agents:
   dev:
-    name: lightman              # Nombre personalizado (opcional)
+    name: falken                # Nombre personalizado (opcional)
     skill: dev                  # Skill integrado o personalizado
     max_changes: 5              # Máx cambios por ciclo
     run_when_blocked: false     # Ejecutar incluso cuando la puerta está bloqueada
@@ -249,6 +268,8 @@ agents:
       - "Audit third-party dependency costs"
 
 sprint:
+  trigger: continuous           # continuous | event | on_demand
+  poll_interval: 300            # Segundos entre polls (modos event/on_demand)
   cycle_sleep: 300              # Segundos entre ciclos
   max_cycles: 0                 # 0 = infinito
   max_hours: 96                 # 0 = infinito
@@ -260,7 +281,7 @@ sprint:
   cross_agent_context: true     # Hallazgos de puerta -> agentes de trabajo
   health_check: true            # Verificar health_url cada ciclo
   recovery_deploy: "bash rollback.sh"
-  git_strategy: snapshot        # none | snapshot
+  git_strategy: hillclimb       # none | snapshot | hillclimb
   agent_stagger: 30             # Segundos de espera entre ejecuciones de agentes
   min_memory_gb: 4              # Esperar por RAM libre antes de cada agente
 
@@ -285,7 +306,15 @@ memory:
   state_dir: .joshua
 ```
 
-Variables de plantilla para prompts: `{agent_name}`, `{skill}`, `{project_name}`, `{project_dir}`, `{deploy_command}`, `{memory}`, `{wiki}`, `{gate_findings}`, `{max_changes}`.
+Variables disponibles en prompts de agentes: `{agent_name}`, `{skill}`, `{project_name}`, `{project_dir}`, `{deploy_command}` (de `project.deploy`), `{program}` (de `program:` top-level), `{memory}`, `{wiki}`, `{gate_findings}`, `{max_changes}`.
+
+Cada ciclo añade una fila a `.joshua/results.tsv` — un log plano, greppable, que no necesita el CLI:
+
+```
+cycle  verdict  duration_s  agents          confidence  metric_before  metric_after  description
+1      GO       284.1       dev,bug-hunter  0.94        12.3           8.1           Fixed SQL injection...
+2      REVERT   312.0       dev,qa          0.97        8.1            15.2          Auth middleware broke...
+```
 
 ## CLI
 
@@ -299,7 +328,7 @@ joshua evolve config.yaml           # Ejecutar evolución + mantenimiento de wik
 ```
 
 
-> **Seguridad en deploy**: El `deploy_command` de tu config se ejecuta como un comando de shell con los permisos de tu usuario. Usa el modo dry-run (`joshua run config.yaml --dry-run`) para validar la config antes de ejecutar. Nunca uses configs YAML de fuentes no confiables.
+> **Seguridad en deploy**: `project.deploy` se ejecuta como un comando de shell con los permisos de tu usuario. Los metacaracteres de shell (`;`, `|`, `` ` ``, `$(`) son rechazados por la validación de config. Usa el modo dry-run (`joshua run config.yaml --dry-run`) para validar antes de ejecutar. Nunca uses configs YAML de fuentes no confiables.
 
 ## Ejemplos
 

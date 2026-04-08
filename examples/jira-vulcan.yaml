@@ -1,0 +1,34 @@
+# Vulcan — Bug hunting agent with dynamic Jira task fetching
+#
+# Vulcan fetches open bugs from Jira every cycle instead of using static tasks.
+# Run: joshua run examples/jira-vulcan.yaml --max-cycles 1
+#
+# task_source: jira → agent calls Jira REST API to get tasks dynamically.
+# Static tasks[] is used as fallback when Jira returns no results.
+
+project:
+  name: my-project
+  path: ~/projects/my-project
+
+runner:
+  type: claude
+  timeout: 1800
+
+agents:
+  vulcan:
+    skill: vulcan
+    task_source: jira
+    task_source_config:
+      base_url: ${JIRA_BASE_URL}
+      user: ${JIRA_USER}
+      token: ${JIRA_TOKEN}
+      project_key: PROJ
+      jql: "project = PROJ AND type = Bug AND resolution = Unresolved ORDER BY priority DESC"
+      max_results: 5
+    tasks:
+      - "Proactive bug scan — error handling, security, accessibility"
+
+sprint:
+  max_cycles: 1
+  cycle_sleep: 0
+  gate_blocking: false

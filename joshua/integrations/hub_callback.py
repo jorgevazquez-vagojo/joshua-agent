@@ -13,6 +13,8 @@ import time
 
 import requests
 
+from joshua.utils.url_safety import validate_url
+
 log = logging.getLogger("joshua")
 
 
@@ -23,6 +25,12 @@ class HubCallback:
         self.api_url = api_url.rstrip("/")
         self.group_id = group_id
         self.token = token
+        # Validate hub URL at init — reject private/loopback addresses
+        try:
+            validate_url(self.api_url)
+        except ValueError as e:
+            log.warning(f"Hub callback URL rejected (SSRF protection): {e}")
+            self.api_url = ""  # disable
 
     def _headers(self) -> dict:
         h = {"Content-Type": "application/json"}

@@ -1,5 +1,7 @@
 """OpenAI Codex CLI runner."""
 
+from __future__ import annotations
+
 from joshua.runners.base import LLMRunner, RunResult
 
 

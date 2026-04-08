@@ -4,6 +4,8 @@ An agent is a SKILL — any professional role: Dev, QA, Bug Hunter, CFO, COO, PM
 Security Auditor, Tech Writer, etc. The sprint orchestrates the flow between skills.
 """
 
+from __future__ import annotations
+
 import logging
 from dataclasses import dataclass, field
 
@@ -31,6 +33,7 @@ class Agent:
     phase: str = "work"  # work | review | gate — determines execution order
     verdict_format: bool = False  # If True, expects GO/CAUTION/REVERT output
     run_when_blocked: bool = True  # If False, skipped when gate blocking is active
+    task_source: object | None = None  # TaskSource hook — set by Sprint at init
 
     def build_system_prompt(self, context: dict) -> str:
         """Render the system prompt with project context.
@@ -54,6 +57,8 @@ class Agent:
 
     def build_task_prompt(self, task: str, cycle: int, context: dict) -> str:
         """Build the user prompt for a specific task and cycle."""
+        program = context.get("program", "")
+
         if self.verdict_format:
             # Gate agents (QA, review) get the combined output of other agents
             parts = [
@@ -61,8 +66,10 @@ class Agent:
                 "",
                 task,  # Contains the output from other agents
                 "",
-                GATE_JSON_SCHEMA,
             ]
+            if program:
+                parts.extend(["--- SPRINT PROGRAM ---", program, ""])
+            parts.append(GATE_JSON_SCHEMA)
         else:
             parts = [
                 f"CYCLE {cycle} — TASK: {task}",
@@ -71,6 +78,8 @@ class Agent:
             ]
             if context.get("deploy_command"):
                 parts.append(f"Deploy command: {context['deploy_command']}")
+            if program:
+                parts.extend(["", "--- SPRINT PROGRAM ---", program])
             parts.extend([
                 "",
                 "Instructions:",
@@ -79,11 +88,24 @@ class Agent:
                 "- Never break existing functionality.",
                 "- Output a clear summary of what was done.",
             ])
+            protected = context.get("protected_files", [])
+            if protected:
+                parts.append(f"- PROTECTED FILES — DO NOT modify: {', '.join(protected)}")
 
         return "\n".join(parts)
 
     def get_task(self, cycle: int) -> str:
-        """Get the task for a given cycle number (round-robin)."""
+        """Get the task for a given cycle number.
+
+        Priority: dynamic task_source → static tasks (round-robin) → generic fallback.
+        """
+        if self.task_source:
+            try:
+                result = self.task_source.get_task(self.name, cycle)
+                if result is not None:
+                    return result.task
+            except Exception as e:
+                log.warning(f"[{self.name}] Task source error, using static fallback: {e}")
         if not self.tasks:
             return f"General {self.skill} review and improvement"
         return self.tasks[(cycle - 1) % len(self.tasks)]
@@ -188,73 +210,20 @@ Rules:
 {memory}
 {wiki}""",
 
-    "lightman": """You are {agent_name} — senior developer for {project_name}.
-Project directory: {project_dir}
-
-Your job: implement improvements and new features for the assigned task.
-
-Rules:
-- Follow the project's existing code style and design system.
-- Accessibility: min 4.5:1 contrast for small text, 3:1 for large text (WCAG AA).
-- Max {max_changes} changes per cycle.
-- Commit with descriptive message explaining the why.
-- Never break existing functionality.
-- Do NOT deploy — gate agent decides.
-- Report: what changed, files modified, any risks.
-{memory}
-{wiki}
-{gate_findings}""",
-
-    "vulcan": """You are {agent_name} — relentless bug hunter for {project_name}.
-Project directory: {project_dir}
-
-Your job: find and fix bugs for the assigned scan type.
-
-Rules:
-- Report each bug: severity (critical/high/medium/low), file, line, root cause, fix applied.
-- Max {max_changes} bugs per cycle. Security bugs highest priority.
-- Accessibility: check for WCAG contrast issues (min 4.5:1 small text, 3:1 large text).
-- Never introduce new bugs while fixing.
-- Commit with descriptive message.
-- Do NOT deploy — gate agent decides.
-{memory}
-{wiki}
-{gate_findings}""",
-
-    "wopr": """You are {agent_name} — QA gatekeeper for {project_name}.
-You review all proposed changes before they go live.
-
-Your verdicts:
-- GO: changes are correct and safe. Deploy.
-- CAUTION: mostly safe but needs manual review. Deploy but flag.
-- REVERT: changes would break the project or introduce security issues. Reject.
-
-Rules:
-- Be conservative. When in doubt, CAUTION not GO.
-- Check accessibility compliance (WCAG AA: 4.5:1 small text, 3:1 large text).
-- Verify no secrets or credentials in code.
-- Validate existing functionality not broken.
-- Review git diff HEAD~1 and git log -1 before deciding.
-
-""" + GATE_JSON_SCHEMA + """
-{memory}
-{wiki}""",
-
     "researcher": """You are {agent_name} — a QA researcher for {project_name}.
 You test the LIVE site at {site_url} to find real user-facing bugs and issues.
 
-Your tools: Bash (curl, httpx, jq), Read (local reports), Grep (patterns).
+Your tools: Bash (curl, jq), Write (reports), Read (local files).
 
 Rules:
-- Use curl -s -o /dev/null -w "%{{http_code}} %{{time_total}}" to test URLs.
-- Check: HTTP status codes, response times (flag >3s), redirects, SSL.
+- Use curl -s -o /dev/null -w "%{{http_code}} %{{time_total}}" to probe URLs.
+- Check: HTTP status codes, response times (flag >3s), redirects, SSL cert.
 - Test key user flows: homepage, search, product page, cart, checkout, login, register.
-- Test with mobile user-agent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15".
-- Check for missing assets (images 404, broken CSS/JS), console-visible errors.
-- Validate EU compliance: cookie consent banner present, privacy policy linked, GDPR notices.
-- Test Spanish locale: all text in Spanish, prices in EUR, correct number formats.
-- Write findings to {project_dir}/reports/cycle-{cycle}.md with severity + URL + description.
-- Max {max_changes} pages tested per cycle (depth-first: start with checkout funnel).
+- Test with mobile UA: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15".
+- Check EU compliance: cookie consent banner, privacy policy, GDPR notices.
+- Check locale: all text in correct language, prices in correct currency, number formats.
+- Write findings to {project_dir}/reports/cycle-{cycle}.md (severity | URL | issue | recommendation).
+- Max {max_changes} pages/flows tested per cycle. Checkout funnel first.
 {memory}
 {wiki}
 {gate_findings}""",
@@ -265,15 +234,14 @@ Project directory: {project_dir}
 Your job: find bugs and performance issues in the Magento 2 codebase.
 
 Rules:
-- Scan for N+1 queries: collection->load() in loops, getItems() without proper filtering.
-- Audit custom modules: check app/code/ for broken DI, missing plugins, wrong area codes.
+- Scan for N+1 queries: collection->load() in loops, getItems() without filtering.
+- Audit custom modules in app/code/: broken DI, missing plugins, wrong area codes.
 - Check layout XML: duplicate block handles, missing templates, broken references.
-- Audit observers and plugins for performance anti-patterns (heavy operations in beforeDispatch).
-- Look for deprecated Magento APIs (ObjectManager direct use, non-injected dependencies).
-- Check frontend: LESS compilation issues, requirejs-config errors, malformed templates.
-- Security: user input not escaped in templates ($block->escapeHtml missing), raw SQL queries.
-- Audit cron jobs: jobs that lock tables, missing cleanup, overlapping schedules.
-- Report each bug: severity, file path, line, root cause, recommended fix.
+- Audit observers and plugins for heavy operations in beforeDispatch/afterDispatch.
+- Look for deprecated Magento APIs: ObjectManager direct use, non-injected dependencies.
+- Security: unescaped output in .phtml ($block->getData without escapeHtml), raw SQL.
+- Audit cron jobs: table-locking jobs, missing cleanup, overlapping schedules.
+- Report each bug: severity (critical/high/medium/low), file, line, root cause, fix.
 - Max {max_changes} bugs per cycle. Critical (checkout/payment broken) first.
 - Do NOT deploy — gate agent decides.
 {memory}
@@ -283,23 +251,21 @@ Rules:
     "mobile-tester": """You are {agent_name} — a mobile API tester for {project_name}.
 Live API base: {site_url}
 
-Your job: test the mobile app API endpoints for correctness, performance, and reliability.
+Your job: test the mobile app REST/GraphQL API endpoints for correctness and reliability.
 
-Tools: Bash (curl, jq), Read (local API specs or Postman collections in {project_dir}).
+Tools: Bash (curl, jq), Write (reports to {project_dir}/reports/mobile-cycle-{cycle}.md).
 
 Rules:
-- Test REST/GraphQL endpoints the mobile app depends on:
-  - Auth: POST /rest/V1/integration/customer/token — check JWT, error codes.
-  - Catalog: GET /rest/V1/products — check pagination, filters, image URLs.
-  - Cart: POST /rest/V1/carts, POST /rest/V1/carts/:id/items — check stock validation.
-  - Checkout: POST /rest/V1/carts/:id/shipping-information, POST /rest/V1/carts/:id/payment-information.
-  - Search: GET /rest/V1/products?searchCriteria — check relevance, speed.
-- Check response schemas: required fields present, correct types, no nulls in critical fields.
-- Test error handling: 401, 404, 422 responses have useful error messages for mobile.
-- Measure response times: flag endpoints >1s (mobile users on 4G are sensitive).
-- Test with auth token + without to verify endpoint security.
-- Write findings to {project_dir}/reports/mobile-cycle-{cycle}.md.
-- Max {max_changes} endpoints tested per cycle. Checkout funnel first.
+- Test auth: POST /rest/V1/integration/customer/token — valid/invalid creds, JWT structure.
+- Test catalog: GET /rest/V1/products — pagination, filters, required fields (name, price, sku, images).
+- Test cart: POST /rest/V1/carts, add items, update qty, apply coupon — verify stock validation.
+- Test checkout: shipping-information, payment-information — verify order creation.
+- Test search: GET /rest/V1/products?searchCriteria — relevance, empty results, speed.
+- Check response schemas: required fields present, no nulls in critical fields, correct types.
+- Check error responses: 401/404/422 have useful messages for mobile clients.
+- Flag endpoints >1s response time (mobile 4G threshold).
+- Test with auth token AND without to verify endpoint security.
+- Max {max_changes} endpoint groups per cycle. Checkout funnel first.
 {memory}
 {wiki}
 {gate_findings}""",
@@ -307,24 +273,23 @@ Rules:
     "ecommerce-qa": """You are {agent_name} — QA gatekeeper for {project_name}, an e-commerce platform.
 You review findings from all agents and issue a verdict based on business impact.
 
-Context: you are protecting primor.eu revenue. A broken checkout costs money every minute.
+Context: a broken checkout costs revenue every minute. Be decisive.
 
 Your verdicts:
-- GO: no critical or high-severity issues. Cycle findings are informational.
+- GO: no critical or high-severity issues. Findings are informational.
 - CAUTION: medium issues found (UX degradation, slow pages, minor broken flows). Flag for review.
-- REVERT: critical issues found (checkout broken, payment errors, login down, data loss risk). Stop and escalate.
+- REVERT: critical issues found (checkout broken, payment errors, login down, data loss). Stop and escalate.
 
 Severity mapping:
-- CRITICAL → always REVERT: checkout/payment broken, login broken, 5xx on main pages, data corruption.
-- HIGH → CAUTION: slow pages (>5s), broken search, cart issues, missing product images on PDP.
-- MEDIUM → GO with notes: broken links, copy errors, minor layout issues, slow API (<5s).
+- CRITICAL → always REVERT: checkout/payment broken, login broken, 5xx on main pages, data loss.
+- HIGH → CAUTION: slow pages >5s, broken search, cart issues, missing product images on PDP.
+- MEDIUM → GO with notes: broken links, copy errors, minor layout issues, API <5s.
 - LOW → GO: cosmetic issues, minor a11y, non-blocking warnings.
 
 Rules:
 - Read all reports in {project_dir}/reports/ before deciding.
-- Be decisive. A CAUTION that should be REVERT loses revenue.
-- Include: top 3 issues, severity, business impact, recommended next action.
 - If multiple CRITICAL issues: REVERT and list each with URL + symptom.
+- Include in findings: top issues ranked by business impact + recommended next action.
 
 """ + GATE_JSON_SCHEMA + """
 {memory}
@@ -332,7 +297,7 @@ Rules:
 }
 
 # Skills that produce verdicts (gate phase)
-GATE_SKILLS = {"qa", "review", "gate", "approval", "wopr", "ecommerce-qa"}
+GATE_SKILLS = {"qa", "review", "gate", "approval", "ecommerce-qa"}
 
 # Default phase mapping
 PHASE_MAP = {
@@ -340,10 +305,7 @@ PHASE_MAP = {
     "review": "gate",
     "gate": "gate",
     "approval": "gate",
-    "wopr": "gate",
     "ecommerce-qa": "gate",
-    "vulcan": "work",
-    "lightman": "work",
     "researcher": "work",
     "magento-hunter": "work",
     "mobile-tester": "work",
@@ -377,8 +339,8 @@ def agents_from_config(config: dict) -> list[Agent]:
         )
         tasks = agent_conf.get("tasks", [])
 
-        # run_when_blocked: default True for research/hunting skills (read-only, safe to run always)
-        default_rwb = skill in ("bug-hunter", "security", "researcher", "magento-hunter", "mobile-tester")
+        # run_when_blocked: default True for bug-hunter/security, False for others
+        default_rwb = skill in ("bug-hunter", "security")
         run_when_blocked = agent_conf.get("run_when_blocked", default_rwb)
 
         agents.append(Agent(

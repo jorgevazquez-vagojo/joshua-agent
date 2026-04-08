@@ -4,17 +4,16 @@
 
 | Signal | Status |
 | --- | --- |
-| Package | `0.6.0` |
-| Repo | `27 commits` on `main` |
-| Tests | `262 pytest tests`; CI runs on Python `3.11`, `3.12`, `3.13` |
+| Package | `0.6.1` |
+| Repo | `50 commits` on `main` |
+| Tests | `301 pytest tests`; CI runs on Python `3.11`, `3.12`, `3.13` |
 | Release path | GitHub Actions CI + PyPI publish workflow |
 
 ## Demo
 
-https://github.com/jorgevazquez-vagojo/joshua-agent/assets/demo_en.mp4
+![joshua-agent demo](assets/demo.gif)
 
-[🇪🇸 Ver demo en español](assets/demo_es.mp4)
-
+*Real execution: 2 cycles — Cycle 1 GO (deploy), Cycle 2 REVERT (rollback). [asciinema recording](assets/demo.cast)*
 
 Define your team in YAML. Agents work in cycles — dev, bug-hunter, QA. The gate decides:  deploys.  rolls back. You come back to a log.
 
@@ -25,6 +24,23 @@ Built for software delivery. Each cycle: work agents write and fix code, a gate 
 Named after the AI in WarGames that learned the only winning move is to keep playing.
 
 ```
+
+## Current status
+
+**Stable**
+
+- YAML-defined multi-agent sprints with `work` and `gate` phases
+- `GO` / `CAUTION` / `REVERT` verdict loop with snapshot or hillclimb git strategies
+- CLI workflow: `joshua run`, `joshua status`, `joshua evolve`, `joshua serve`
+- HTTP control plane, process-based runtime, persistence, notifications, and restart recovery
+- Safety config with command/path allowlists, protected files, objective metrics, and explicit verdict policy wiring
+
+**Experimental**
+
+- Unattended live deploys on real production infrastructure
+- Self-learning wiki quality and prompt evolution across long-running sprints
+- Event-driven and on-demand modes that depend on custom task sources and hooks
+- Custom runners and hook chains that execute arbitrary shell commands
  Work Skills              Gate Skills
 +--------------+          +----------+
 | Dev          |          |          |
@@ -35,23 +51,6 @@ Named after the AI in WarGames that learned the only winning move is to keep pla
        ^                       |
        +---- next cycle -------+
 ```
-
-## Current status
-
-**Stable**
-
-- YAML-defined multi-agent sprints with `work` and `gate` phases
-- `GO` / `CAUTION` / `REVERT` gate loop with git snapshot/revert strategies
-- CLI workflow: `joshua run`, `joshua status`, `joshua evolve`
-- Runner abstraction for Claude Code, Codex, Aider, and custom CLIs
-- HTTP control plane, notifications, checkpoints, and per-cycle logs
-
-**Experimental**
-
-- Unattended live deploys on real production infrastructure
-- Self-learning wiki quality and prompt evolution across long-running sprints
-- Non-software domains that need custom prompts, policies, and wrapper scripts
-- Custom runners that execute arbitrary shell commands
 
 ## How it works
 
@@ -205,6 +204,14 @@ Sleeping 600s before next cycle...
 
 **Resource-aware scheduling.** Each LLM agent consumes significant memory. Running multiple sprints on the same machine can trigger OOM kills (we learned this the hard way). `min_memory_gb` checks available RAM before each agent run — if memory is low, joshua-agent waits instead of crashing. `agent_stagger` adds a fixed delay between agent executions to let the system breathe. Together, they let you safely run multiple sprints on a single server.
 
+**Objective metrics.** Gate agents are good at qualitative review, but they can't replace a test suite. `project.objective_metric` defines a shell command that returns a number (lower is better). joshua-agent runs it before and after work agents, injects the delta into the gate prompt, and logs both values to `results.tsv`. The gate agent now has hard data alongside its qualitative judgment. Think `pytest --tb=no -q`, a benchmark script, or any command that outputs a number.
+
+**Protected files.** `project.protected_files` lists globs that work agents must not modify. The instruction is injected directly into the task prompt: "DO NOT modify: tests/\*\*, eval.py". This prevents agents from "gaming" the metric by editing the evaluation or test harness — the same pattern Karpathy uses in autoresearch where `prepare.py` is read-only.
+
+**Hillclimb git strategy.** `git_strategy: hillclimb` turns git into a hill-climbing checkpoint. Before each cycle, joshua-agent commits the current state. After work agents run and the gate reviews, a `REVERT` verdict triggers `git reset --hard` to the checkpoint. A `GO` verdict keeps the commit. The result: every surviving commit in git history is a verified improvement. Compare with `snapshot`, which creates branches per cycle — hillclimb is simpler and produces a linear history.
+
+**Three trigger modes.** `sprint.trigger` controls when cycles run. `continuous` (default) runs cycles back-to-back with `cycle_sleep` between them — good for proactive improvement. `event` polls task sources (Jira, GitHub) every `poll_interval` seconds and only runs a cycle when there's real work — no tasks, no Claude calls, no tokens burned. `on_demand` waits for an external trigger via the API (`trigger_cycle()`) — useful for CI/CD integration where a deploy or PR event kicks off a review.
+
 ## Supported runners
 
 | Runner | Command | Install |
@@ -220,8 +227,19 @@ Sleeping 600s before next cycle...
 project:
   name: my-project
   path: ~/my-project                # Any folder — code, docs, reports, data
-  deploy: "./deploy.sh"             # Optional — prefer a wrapper script you control
+  deploy: "bash deploy.sh"          # Optional — omit for non-code sprints
   health_url: http://localhost:3000/health  # Optional
+  objective_metric: "pytest --tb=no -q | tail -1"  # Command that prints a number (lower = better)
+  protected_files:                  # Globs agents must NOT modify
+    - "tests/**"
+    - "eval.py"
+
+program: |                          # Optional — shared context for ALL agents
+  ## Objective
+  Reduce p95 latency below 200ms.
+  ## Constraints
+  - Do NOT modify database schema
+  - Only edit files in src/api/
 
 runner:
   type: claude                  # claude | codex | aider | custom
@@ -230,7 +248,7 @@ runner:
 
 agents:
   dev:
-    name: lightman              # Custom name (optional)
+    name: falken                # Custom name (optional)
     skill: dev                  # Built-in or custom skill
     max_changes: 5              # Max changes per cycle
     run_when_blocked: false     # Run even when gate is blocked
@@ -250,6 +268,8 @@ agents:
       - "Audit third-party dependency costs"
 
 sprint:
+  trigger: continuous           # continuous | event | on_demand
+  poll_interval: 300            # Seconds between polls (event/on_demand modes)
   cycle_sleep: 300              # Seconds between cycles
   max_cycles: 0                 # 0 = infinite
   max_hours: 96                 # 0 = infinite
@@ -261,7 +281,7 @@ sprint:
   cross_agent_context: true     # Gate findings -> work agents
   health_check: true            # Check health_url each cycle
   recovery_deploy: "bash rollback.sh"
-  git_strategy: snapshot        # none | snapshot
+  git_strategy: hillclimb       # none | snapshot | hillclimb
   agent_stagger: 30             # Seconds to wait between agent runs
   min_memory_gb: 4              # Wait for free RAM before each agent
 
@@ -286,7 +306,15 @@ memory:
   state_dir: .joshua
 ```
 
-Template variables for prompts: `{agent_name}`, `{skill}`, `{project_name}`, `{project_dir}`, `{deploy_command}`, `{memory}`, `{wiki}`, `{gate_findings}`, `{max_changes}`.
+Template variables available in agent prompts: `{agent_name}`, `{skill}`, `{project_name}`, `{project_dir}`, `{deploy_command}` (from `project.deploy`), `{program}` (from top-level `program:`), `{memory}`, `{wiki}`, `{gate_findings}`, `{max_changes}`.
+
+Each cycle appends one row to `.joshua/results.tsv` — a greppable, diffable log that doesn't need the CLI:
+
+```
+cycle  verdict  duration_s  agents          confidence  metric_before  metric_after  description
+1      GO       284.1       dev,bug-hunter  0.94        12.3           8.1           Fixed SQL injection...
+2      REVERT   312.0       dev,qa          0.97        8.1            15.2          Auth middleware broke...
+```
 
 ## CLI
 
@@ -300,7 +328,7 @@ joshua evolve config.yaml           # Run evolution + wiki maintenance
 ```
 
 
-> **Deploy safety**: The `deploy_command` in your config runs as a shell command with your user's permissions. Use dry-run mode (`joshua run config.yaml --dry-run`) to validate config before running. Never use untrusted YAML configs.
+> **Deploy safety**: `project.deploy` runs as a shell command with your user's permissions. Shell metacharacters (`;`, `|`, `` ` ``, `$(`) are rejected by config validation. Use dry-run mode (`joshua run config.yaml --dry-run`) to validate before running. Never use untrusted YAML configs.
 
 ## Examples
 

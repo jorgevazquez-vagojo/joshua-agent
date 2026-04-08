@@ -4,6 +4,8 @@ Pipeline: Sources -> raw/ -> WIKI (entries/) -> Q&A Agent -> Output
 The LLM writes everything. Agents just steer. Every answer compounds.
 """
 
+from __future__ import annotations
+
 import logging
 import os
 import re

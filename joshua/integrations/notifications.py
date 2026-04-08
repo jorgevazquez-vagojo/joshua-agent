@@ -7,6 +7,8 @@ import time
 import urllib.request
 from abc import ABC, abstractmethod
 
+from joshua.utils.url_safety import validate_url
+
 log = logging.getLogger("joshua")
 
 # Max failures before a notifier is disabled (circuit breaker)
@@ -40,7 +42,8 @@ class Notifier(ABC):
                 self._failures = 0  # reset on success
             except Exception as e:
                 self._failures += 1
-                log.warning(f"Notification failed ({self._failures}/{self._failures_before_disable}): {e}")
+                safe_err = self._redact_error(str(e))
+                log.warning(f"Notification failed ({self._failures}/{self._failures_before_disable}): {safe_err}")
                 if self._failures >= self._failures_before_disable:
                     self._disabled = True
                     log.error(
@@ -50,6 +53,10 @@ class Notifier(ABC):
 
         t = threading.Thread(target=_dispatch, daemon=True)
         t.start()
+
+    def _redact_error(self, error: str) -> str:
+        """Remove tokens/URLs from error messages before logging."""
+        return error
 
     def notify_event(self, event: str, details: str = "", project: str = ""):
         """Send a typed event notification."""
@@ -85,6 +92,11 @@ class TelegramNotifier(Notifier):
             log.warning("Telegram: token or chat_id missing, notifications disabled")
             self._disabled = True
 
+    def _redact_error(self, error: str) -> str:
+        if self.token:
+            error = error.replace(self.token, "[REDACTED]")
+        return error
+
     def _send(self, text: str, agent_name: str = "", silent: bool = False):
         label = self.AGENT_LABELS.get(agent_name, "📋")
         message = f"{label} {text}" if agent_name else text
@@ -113,6 +125,17 @@ class SlackNotifier(Notifier):
         if not self.webhook_url:
             log.warning("Slack: webhook_url missing, notifications disabled")
             self._disabled = True
+        elif not self._disabled:
+            try:
+                validate_url(self.webhook_url, require_https=True)
+            except ValueError as e:
+                log.warning(f"Slack webhook_url rejected (SSRF protection): {e}")
+                self._disabled = True
+
+    def _redact_error(self, error: str) -> str:
+        if self.webhook_url:
+            error = error.replace(self.webhook_url, "[REDACTED URL]")
+        return error
 
     def _send(self, text: str, agent_name: str = "", silent: bool = False):
         payload = json.dumps(
@@ -131,6 +154,18 @@ class WebhookNotifier(Notifier):
         self.url = config.get("url", "")
         self._failures_before_disable = config.get("failures_before_disable",
                                                     DEFAULT_FAILURES_BEFORE_DISABLE)
+        if self.url:
+            try:
+                validate_url(self.url)
+            except ValueError as e:
+                log.warning(f"Webhook URL rejected (SSRF protection): {e}")
+                self.url = ""
+                self._disabled = True
+
+    def _redact_error(self, error: str) -> str:
+        if self.url:
+            error = error.replace(self.url, "[REDACTED URL]")
+        return error
 
     def _send(self, text: str, agent_name: str = "", silent: bool = False):
         if not self.url:

@@ -1,72 +1,107 @@
 # Changelog
 
-All notable changes to `joshua-agent` are documented here.
+All notable changes to joshua-agent are documented here.
+
+## [0.6.1] — 2026-04-06
+
+### Fixed
+- **Config contract unified**: schema now matches what the runtime reads.
+  `project.deploy` and `project.health_url` in `project:`;
+  `sprint.cycle_sleep`, `sprint.revert_sleep`, `sprint.health_check` in `sprint:`.
+  Removed dead fields (`deploy_command`, `revert_command`, `health_check_command`, `cycle_delay`).
+- Schema `extra: "allow"` → `"ignore"` at top level; added `PreflightConfig` and `TrackerConfig`.
+- Shell metacharacter validation on `project.deploy` and config `${VAR:default}` values.
+- README deploy safety warning references `project.deploy`, not `deploy_command`.
+
+### Security
+- DB files restricted to 0600/0700 (was world-readable 0644).
+- Worker errors redacted before storing in SQLite.
+- Shell injection regex blocks `$VAR`, `${}`, newlines (was only `; | \` $()`).
+- SSRF: health checks, hub callbacks, Slack/webhook notifiers validate URLs against private IPs.
+- Jira task source enforces HTTPS (credentials via Basic Auth).
+- Server `INTERNAL_TOKEN` requires minimum 16 characters.
+- Notification error logs redact tokens and webhook URLs.
+- Sprint log API redacts secrets before returning lines.
+- FastAPI: rate limiting (30 req/min/token), security headers (nosniff, DENY, no-store).
 
 ## [0.6.0] — 2026-04-06
 
-### Changed
-- Repositioned the README around verifiable product signals instead of pure editorial narrative
-- Reworked the Quick Start to be safe by default, with `./deploy.sh` as the first deploy pattern
-- Added explicit `Current status` / `Estado actual` sections to separate stable capabilities from experimental ones
-- Promoted public package maturity from Alpha to Beta in `pyproject.toml`
+### Added
+- **Process-based runtime**: each sprint runs in its own `multiprocessing.Process`.
+- **SQLite persistence** (`SprintDB`): durable sprint state, WAL mode, survives restarts.
+- **ProcessManager**: start/stop/list sprints with real process lifecycle.
+- **Supervisor thread**: detects zombie sprints, cleans up leaked processes.
+- **Task source hooks**: `TaskSource` ABC with `JiraTaskSource` for dynamic Jira task fetching.
+- Hub callback: POST sprint status to external systems on lifecycle events.
 
-### Fixed
-- HTTP server now tolerates lightweight sprint stubs that do not implement per-sprint file logging, which restores the `tests/test_server.py` start/stop path
+### Changed
+- Demo: WarGames characters (Falken, Jennifer, McKittrick), FastAPI Task Manager.
+- Removed `lightman`/`vulcan`/`wopr` skill templates (redundant copies).
+- `from __future__ import annotations` across all modules.
+- Classifier: Alpha → Beta.
 
 ## [0.5.0] — 2026-04-06
 
-### Added
-- Strict GitHub Actions CI across Python `3.11`, `3.12`, and `3.13`
-- Real HTTP server tests and the dev dependencies needed to run them locally
-- Graceful shutdown paths for long-running sprints
-
 ### Security
-- Full callback and control-plane hardening, including stronger SSRF defenses
-- Safer CLI defaults and tighter request validation on the HTTP server
-- Hardened sprint cancellation paths
+- **SSRF protection**: DNS resolution + `ipaddress` validation blocks private IPs, IPv6 ULA, DNS rebinding.
+- **Timing-safe auth**: `hmac.compare_digest()` for token comparison.
+- **Supply chain**: `pypa/gh-action-pypi-publish` pinned to SHA.
+- **CI permissions**: `contents: read` only. Lint mandatory.
+
+### Reliability
+- Graceful shutdown: server stops all running sprints on SIGTERM with 30s timeout.
+- Registry cleanup: finished sprints evicted from in-memory registry (prevents leaks).
+- Lock file properly closed in `finally` block and removed on exit.
+
+### Housekeeping
+- Version from `importlib.metadata` (single source of truth).
+- `datetime.utcnow()` → `datetime.now(timezone.utc)` (Python 3.12 compat).
+- Path traversal fix in `FilesystemTracker.add_comment()`.
 
 ## [0.4.0] — 2026-04-06
 
 ### Added
-- Persistent sprint state across cycles
-- Explicit gate contract for `GO`, `CAUTION`, and `REVERT`
-- Per-sprint log files for auditability and postmortems
+- **SQLite sprint persistence**: `SprintDB` tracks full lifecycle, orphaned sprints marked `interrupted` on restart.
+- **Strict gate verdict contract**: `GateVerdict` Pydantic model, `verdict_source` field (`json`|`legacy`|`default`).
+- **Per-sprint log files**: `RotatingFileHandler` (10MB × 3), `GET /sprints/{id}/logs` endpoint.
+- `GATE_JSON_SCHEMA` embedded in all gate prompts (single source of truth).
 
 ## [0.3.0] — 2026-04-06
 
-### Added
-- Pydantic config validation with clearer errors
-- Structured cycle event output
-- `--no-deploy` flag for safer dry runs on live projects
+### Security
+- `bash -c` / `sh -c` rejected in `safe_cmd.py` (equivalent to `shell=True`).
+- Shell interpreters may only run script files (`bash ./deploy.sh`).
+- `project.path` required — returns 422 if omitted.
 
-### Changed
-- Public docs and examples were overhauled for external use
+### Improved
+- Verdict parser: 3 JSON patterns (fenced code block, generic, raw inline).
+- `last_gate_*` fields always populated (including fallback paths).
+- Default CAUTION fallback logs truncated gate output for debugging.
 
 ## [0.2.0] — 2026-04-06
 
-### Added
-- Safe command execution defaults
-- SSRF guardrails and rate limiting
-- JSON verdict handling for gate agents
+### Security
+- `CustomRunner`: removed `shell=True`, uses `shlex.split()` (RCE prevention).
+- Server: removed `X-Internal-Token` forwarding to callback URLs (token exfiltration).
 
-### Changed
-- Package URLs, author metadata, and public-release positioning
+### Fixed
+- `git.py snapshot()`: stash restored with `git stash pop` on failure.
+- `agents.py get_task()`: cycle 1 correctly maps to `tasks[0]`.
+
+### Tests
+- 18 dedicated HTTP endpoint tests (auth, SSRF, sprint lifecycle).
 
 ## [0.1.0] — 2026-04-06
 
 ### Added
-- Multi-agent sprint loop: work agents run in cycles, gate agent issues `GO` / `CAUTION` / `REVERT`
-- Skills system: define agent roles in YAML (`dev`, `qa`, `legal`, `cfo`, or anything else)
-- Runners for Claude Code CLI, Aider, Codex, and custom command templates
-- Quality gate: `GO` auto-deploys, `CAUTION` continues, `REVERT` rolls back via git
-- Self-learning wiki: lessons extracted per cycle, wiki synthesized later via `joshua evolve`
-- HTTP control plane: `joshua serve` exposes a REST API for sprint management
-- Notifications: Telegram, Slack, and webhook backends
-- Git integration: auto-detect `main` / `master` / `develop`, snapshot branches per cycle
-- Checkpointing: resume a sprint after a crash via `.joshua/checkpoint.json`
-- Structured cycle events in `.joshua/events/cycle_NNNN.json`
-- Output truncation for oversized agent responses
-- File locking to prevent concurrent sprints on the same `.joshua` directory
-- `--dry-run` CLI flag for config validation without execution
-- Log rotation in `.joshua/logs/`
-- Example configs for Python API, Next.js, WordPress, minimal, full-team, executive-team, and legal-review
+- Multi-agent sprint loop with GO/CAUTION/REVERT verdicts.
+- Skills system: dev, qa, bug-hunter, security, perf, pm, tech-writer, or any custom skill.
+- Runners: Claude Code, Aider, Codex, Custom command template.
+- Self-learning wiki: lessons per cycle, synthesized daily (`joshua evolve`).
+- HTTP control plane: `joshua serve` REST API.
+- Notifications: Telegram, Slack, Webhook with circuit breaker.
+- Git integration: auto-detect branches, snapshot per cycle.
+- Checkpointing, structured cycle events, Pydantic v2 validation.
+- Rate limiting, output truncation, file locks, log rotation.
+- `--no-deploy`, `--dry-run` CLI flags. SIGTERM/SIGINT shutdown.
+- Examples: python-api, nextjs, wordpress, minimal, full-team, executive-team, legal-review.

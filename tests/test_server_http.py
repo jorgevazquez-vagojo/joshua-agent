@@ -1,11 +1,12 @@
-"""Dedicated HTTP endpoint tests for Joshua server using FastAPI TestClient."""
+"""HTTP endpoint tests for Joshua server — process-based runtime."""
 
 import os
 import pytest
 from unittest.mock import patch, MagicMock
 
-# Must set token before importing server module
-TOKEN = "test-token-abc123"
+# Must set token before importing server module — generated at test runtime, never hardcoded
+import secrets as _secrets
+TOKEN = _secrets.token_hex(16)
 os.environ["JOSHUA_INTERNAL_TOKEN"] = TOKEN
 
 
@@ -16,14 +17,6 @@ def client():
     from joshua.server import app
     with TestClient(app, raise_server_exceptions=False) as c:
         yield c
-
-
-@pytest.fixture(autouse=True)
-def clear_registry():
-    from joshua import server
-    server._registry.clear()
-    yield
-    server._registry.clear()
 
 
 @pytest.fixture
@@ -41,7 +34,7 @@ def minimal_config(tmp_path):
     }
 
 
-# ── /health ──────────────────────────────────────────────────────────
+# ── /health ────────────────────────────────────────────────��─────────
 
 class TestHealth:
     def test_health_ok(self, client):
@@ -50,16 +43,16 @@ class TestHealth:
         data = r.json()
         assert data["status"] == "ok"
         assert "version" in data
+        assert data["runtime"] == "process"
         assert "sprints_total" in data
         assert "sprints_running" in data
 
     def test_health_no_auth_required(self, client):
-        """Health endpoint must be accessible without a token."""
         r = client.get("/health")
         assert r.status_code == 200
 
 
-# ── Auth ─────────────────────────────────────────────────────────────
+# ── Auth ─────────────────────────────────────��───────────────────────
 
 class TestAuth:
     def test_missing_token_returns_401(self, client, minimal_config):
@@ -86,12 +79,8 @@ class TestAuth:
 # ── POST /sprints ────────────────────────────────────────────────────
 
 class TestStartSprint:
-    @patch("joshua.server.threading.Thread")
-    def test_start_sprint_success(self, mock_thread, client, auth_headers, minimal_config):
-        mock_t = MagicMock()
-        mock_t.is_alive.return_value = True
-        mock_thread.return_value = mock_t
-
+    @patch("joshua.process_manager.ProcessManager.spawn", return_value=12345)
+    def test_start_sprint_success(self, mock_spawn, client, auth_headers, minimal_config):
         r = client.post(
             "/sprints",
             json={"config": minimal_config},
@@ -101,7 +90,8 @@ class TestStartSprint:
         data = r.json()
         assert "sprint_id" in data
         assert data["project"] == "test-project"
-        assert data["running"] is True
+        assert data["pid"] == 12345
+        mock_spawn.assert_called_once()
 
     def test_invalid_config_version_returns_422(self, client, auth_headers, minimal_config):
         r = client.post(
@@ -126,7 +116,6 @@ class TestStartSprint:
         assert r.status_code == 422
 
     def test_ssrf_callback_url_blocked(self, client, auth_headers, minimal_config):
-        """Internal IP in callback_url must be rejected."""
         with patch("joshua.server.socket.getaddrinfo", return_value=[(None, None, None, None, ("127.0.0.1", 80))]):
             r = client.post(
                 "/sprints",
@@ -152,26 +141,19 @@ class TestStartSprint:
         )
         assert r.status_code == 422
 
-    @patch("joshua.server.threading.Thread")
+    @patch("joshua.process_manager.ProcessManager.spawn", return_value=12345)
     @patch("joshua.server.socket.getaddrinfo")
-    def test_callback_url_public_accepted(self, mock_dns, mock_thread, client, auth_headers, minimal_config):
-        # Mock DNS to return a public IP
-        mock_dns.return_value = [(2, 1, 6, "", ("93.184.216.34", 443))]
-        mock_t = MagicMock()
-        mock_t.is_alive.return_value = True
-        mock_thread.return_value = mock_t
-
-        with patch("joshua.server.socket.getaddrinfo", return_value=[(None, None, None, None, ("8.8.8.8", 443))]):
-            r = client.post(
-                "/sprints",
-                json={"config": minimal_config, "callback_url": "https://webhook.example.com/hook"},
-                headers=auth_headers,
-            )
+    def test_callback_url_public_accepted(self, mock_dns, mock_spawn, client, auth_headers, minimal_config):
+        mock_dns.return_value = [(None, None, None, None, ("93.184.216.34", 443))]
+        r = client.post(
+            "/sprints",
+            json={"config": minimal_config, "callback_url": "https://webhook.example.com/hook"},
+            headers=auth_headers,
+        )
         assert r.status_code == 200
 
     def test_ssrf_172_16_blocked(self, client, auth_headers, minimal_config):
-        """172.16.0.0/12 (RFC 1918) must be blocked."""
-        with patch("joshua.server.socket.getaddrinfo", return_value=[(2, 1, 6, "", ("172.16.0.1", 80))]):
+        with patch("joshua.server.socket.getaddrinfo", return_value=[(None, None, None, None, ("172.16.0.1", 80))]):
             r = client.post(
                 "/sprints",
                 json={"config": minimal_config, "callback_url": "http://evil.com/hook"},
@@ -180,8 +162,7 @@ class TestStartSprint:
             assert r.status_code == 422
 
     def test_ssrf_dns_rebinding_blocked(self, client, auth_headers, minimal_config):
-        """DNS resolving to loopback must be blocked."""
-        with patch("joshua.server.socket.getaddrinfo", return_value=[(2, 1, 6, "", ("127.0.0.1", 80))]):
+        with patch("joshua.server.socket.getaddrinfo", return_value=[(None, None, None, None, ("127.0.0.1", 80))]):
             r = client.post(
                 "/sprints",
                 json={"config": minimal_config, "callback_url": "http://public-looking.com/hook"},
@@ -190,28 +171,24 @@ class TestStartSprint:
             assert r.status_code == 422
 
 
-# ── GET /sprints ──────────────────────────────────────────────────────
+# ── GET /sprints ───────────────��──────────────────────────────────────
 
 class TestListSprints:
-    def test_list_sprints_empty(self, client, auth_headers):
+    def test_list_sprints_returns_list(self, client, auth_headers):
         r = client.get("/sprints", headers=auth_headers)
         assert r.status_code == 200
         assert isinstance(r.json(), list)
 
 
-# ── GET /sprints/{id} ─────────────────────────────────────────────────
+# ── GET /sprints/{id} ��───────────────────��───────────────────────────���
 
 class TestGetSprint:
     def test_get_nonexistent_sprint_404(self, client, auth_headers):
         r = client.get("/sprints/nonexistent-id", headers=auth_headers)
         assert r.status_code == 404
 
-    @patch("joshua.server.threading.Thread")
-    def test_get_sprint_after_start(self, mock_thread, client, auth_headers, minimal_config):
-        mock_t = MagicMock()
-        mock_t.is_alive.return_value = True
-        mock_thread.return_value = mock_t
-
+    @patch("joshua.process_manager.ProcessManager.spawn", return_value=12345)
+    def test_get_sprint_after_start(self, mock_spawn, client, auth_headers, minimal_config):
         start_r = client.post(
             "/sprints",
             json={"config": minimal_config},
@@ -225,19 +202,16 @@ class TestGetSprint:
         assert r.json()["sprint_id"] == sprint_id
 
 
-# ── POST /sprints/{id}/stop ───────────────────────────────────────────
+# ── POST /sprints/{id}/stop ──��───────────────────────────────────────
 
 class TestStopSprint:
     def test_stop_nonexistent_sprint_404(self, client, auth_headers):
         r = client.post("/sprints/nonexistent-id/stop", headers=auth_headers)
         assert r.status_code == 404
 
-    @patch("joshua.server.threading.Thread")
-    def test_stop_running_sprint(self, mock_thread, client, auth_headers, minimal_config):
-        mock_t = MagicMock()
-        mock_t.is_alive.return_value = True
-        mock_thread.return_value = mock_t
-
+    @patch("joshua.process_manager.ProcessManager.stop", return_value=True)
+    @patch("joshua.process_manager.ProcessManager.spawn", return_value=12345)
+    def test_stop_running_sprint(self, mock_spawn, mock_stop, client, auth_headers, minimal_config):
         start_r = client.post(
             "/sprints",
             json={"config": minimal_config},

@@ -1,5 +1,7 @@
 """Git operations: snapshot, merge, revert."""
 
+from __future__ import annotations
+
 import logging
 import subprocess
 from pathlib import Path
@@ -119,6 +121,24 @@ class GitOps:
             self._run("commit", "-m", message)
             return True
         except subprocess.CalledProcessError:
+            return False
+
+    def get_head_sha(self) -> str | None:
+        """Get the current HEAD commit SHA."""
+        result = self._run("rev-parse", "HEAD", check=False)
+        if result.returncode == 0:
+            return result.stdout.strip()
+        return None
+
+    def reset_hard(self, ref: str) -> bool:
+        """Hard reset to a specific commit (used by hillclimb on REVERT)."""
+        try:
+            self._run("reset", "--hard", ref)
+            self._run("clean", "-fd")
+            log.info(f"Hard reset to {ref[:12]}")
+            return True
+        except subprocess.CalledProcessError as e:
+            log.error(f"Reset failed: {e.stderr}")
             return False
 
     def push(self, remote: str = "origin", branch: str | None = None) -> bool:
