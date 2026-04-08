@@ -15,3 +15,4 @@ build/
 venv/
 deploy/
 sprint_agents/
+docs/primor-setup.md
