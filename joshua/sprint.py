@@ -26,8 +26,8 @@ from joshua.integrations.trackers import tracker_factory
 from joshua.utils.health import check_health
 from joshua.utils.redact import redact_secrets
 from joshua.utils.safe_cmd import run_command
-from joshua.utils.preflight import run_preflight, check_memory, wait_for_memory
-from joshua.gate_contract import GateVerdict, GATE_JSON_SCHEMA
+from joshua.utils.preflight import run_preflight, wait_for_memory
+from joshua.gate_contract import GateVerdict
 
 log = logging.getLogger("joshua")
 
@@ -40,8 +40,8 @@ class Sprint:
         self.project = config["project"]
         self.project_dir = self.project["path"]
         self.project_name = self.project["name"]
-        self.deploy_cmd = self.project.get("deploy", "")
         self.health_url = self.project.get("health_url", "")
+        self.site_url = self.project.get("site_url", "")
 
         self.runner: LLMRunner = runner_factory(config)
         self.agents = agents_from_config(config)
@@ -56,11 +56,27 @@ class Sprint:
         self.digest_every = sprint_conf.get("digest_every", 0)
         self.max_cycles = sprint_conf.get("max_cycles", 0)  # 0 = infinite
         self.max_hours = sprint_conf.get("max_hours", 0)  # 0 = infinite
+        self.dry_run = sprint_conf.get("dry_run", False)
+        self.deploy_cmd = sprint_conf.get("deploy_command", "") or self.project.get("deploy", "")
+        self.revert_cmd = sprint_conf.get("revert_command", "")
+        self.health_check_command = sprint_conf.get("health_check_command", "")
+        self.verdict_policy = sprint_conf.get(
+            "verdict_policy",
+            {
+                "GO": "deploy",
+                "CAUTION": "deploy_with_warning",
+                "REVERT": "revert",
+            },
+        )
 
         # Production features
         self.gate_blocking = sprint_conf.get("gate_blocking", False)
         self.cross_agent_context = sprint_conf.get("cross_agent_context", False)
-        self.health_check_enabled = sprint_conf.get("health_check", False)
+        self.health_check_enabled = (
+            sprint_conf.get("health_check", False)
+            or bool(self.health_url)
+            or bool(self.health_check_command)
+        )
         self.health_check_max_failures = sprint_conf.get("health_check_max_failures", 3)
         self.recovery_deploy = sprint_conf.get("recovery_deploy", "")
         self.retries = sprint_conf.get("retries", 0)
@@ -71,6 +87,14 @@ class Sprint:
         self.git_strategy = sprint_conf.get("git_strategy", "none")
         self.agent_stagger = sprint_conf.get("agent_stagger", 0)  # seconds between agents
         self.min_memory_gb = sprint_conf.get("min_memory_gb", 0)  # wait for RAM before agent
+
+        safety_conf = config.get("safety", {})
+        self.allowed_commands = safety_conf.get("allowed_commands", [])
+        self.allowed_paths = safety_conf.get("allowed_paths", [])
+        self.approval_command = safety_conf.get("approval_command", "")
+        self.approval_required_actions = set(
+            safety_conf.get("approval_required_actions", [])
+        )
 
         # Memory settings
         mem_conf = config.get("memory", {})
@@ -100,6 +124,12 @@ class Sprint:
         self.last_gate_confidence: float | None = None
         self.last_verdict_source: str = "none"  # "json" | "legacy" | "default"
         self.consecutive_errors = 0
+        self._last_agent_attempts = 1
+        self._current_cycle_started_at: float | None = None
+        self._current_cycle_agent_results: dict[str, dict] = {}
+        self._current_cycle_action: str = "skip"
+        self._current_cycle_approval: dict[str, str] = {"status": "not_required"}
+        self._current_cycle_health: dict[str, str] = {"status": "not_checked"}
 
         # Per-sprint logger — replaced by setup_sprint_logger() when run via server
         self.sprint_id: str = ""
@@ -140,6 +170,44 @@ class Sprint:
             return self._stop_requested
         return self._stop_event.wait(seconds)
 
+    def _run_dry_run(self) -> str:
+        """Emit a structured execution plan without running agents or commands."""
+        plan = {
+            "project": self.project_name,
+            "project_dir": self.project_dir,
+            "cycle": self.cycle + 1,
+            "runner": self.runner.name,
+            "agents": [
+                {
+                    "name": agent.name,
+                    "skill": agent.skill,
+                    "phase": agent.phase,
+                    "run_when_blocked": agent.run_when_blocked,
+                }
+                for agent in self.agents
+            ],
+            "deploy_command": self.deploy_cmd,
+            "health_check_command": self.health_check_command,
+            "verdict_policy": self.verdict_policy,
+            "allowed_commands": self.allowed_commands,
+            "allowed_paths": self.allowed_paths,
+            "approval_command": self.approval_command,
+            "approval_required_actions": sorted(self.approval_required_actions),
+        }
+        self.sprint_logger.info("DRY-RUN — no agents, deploys, or approvals will be executed")
+        self.sprint_logger.info(
+            f"Plan: runner={plan['runner']} | agents={len(plan['agents'])} | "
+            f"deploy={bool(self.deploy_cmd)} | health_check={bool(self.health_check_command)}"
+        )
+        self.sprint_logger.info(
+            f"Policy: {self.verdict_policy} | approvals={plan['approval_required_actions']}"
+        )
+
+        events_dir = self.state_dir / "events"
+        events_dir.mkdir(parents=True, exist_ok=True)
+        (events_dir / "dry_run.json").write_text(json.dumps(plan, indent=2))
+        return "DRY_RUN"
+
     def _set_active_command(self, process):
         with self._command_lock:
             self._active_command_process = process
@@ -165,8 +233,129 @@ class Sprint:
         except OSError:
             process.terminate()
 
+    def _resolve_verdict_action(self, verdict: str) -> str:
+        """Return the configured action for a gate verdict."""
+        action = self.verdict_policy.get(verdict.upper())
+        valid_actions = {"deploy", "deploy_with_warning", "revert", "skip", "stop"}
+        if action not in valid_actions:
+            log.warning(
+                f"Invalid verdict policy action for {verdict!r}: {action!r} — defaulting to skip"
+            )
+            return "skip"
+        return action
+
+    def _approval_needed(self, action: str) -> bool:
+        """Return True when a sensitive action requires human approval."""
+        return bool(self.approval_command) and action in self.approval_required_actions
+
+    def _request_approval(self, action: str, detail: str = "") -> bool:
+        """Run the configured approval command and return True on approval."""
+        if not self._approval_needed(action):
+            self._current_cycle_approval = {"status": "not_required"}
+            return True
+
+        approval_env = {
+            "JOSHUA_PROJECT": self.project_name,
+            "JOSHUA_PROJECT_DIR": self.project_dir,
+            "JOSHUA_CYCLE": str(self.cycle),
+            "JOSHUA_ACTION": action,
+            "JOSHUA_ACTION_DETAIL": detail,
+        }
+        self.sprint_logger.info(f"Approval required for {action} — running approval command")
+        success, output = run_command(
+            self.approval_command,
+            cwd=self.project_dir,
+            timeout=300,
+            dry_run=self.dry_run,
+            extra_env=approval_env,
+            cancel_event=self._stop_event,
+            on_process_start=self._set_active_command,
+            on_process_end=self._clear_active_command,
+            allowed_commands=self.allowed_commands,
+            allowed_paths=self.allowed_paths,
+        )
+        self._current_cycle_approval = {
+            "status": "approved" if success else "denied",
+            "command": self.approval_command,
+            "detail": detail,
+            "output": output[:500],
+        }
+        if not success:
+            self.sprint_logger.warning(f"Approval denied for {action}: {output[:200]}")
+        return success
+
+    def _check_health(self) -> bool:
+        """Run the configured health check, preferring command checks over URLs."""
+        if self.health_check_command:
+            if self.dry_run:
+                self._current_cycle_health = {
+                    "status": "planned",
+                    "mode": "command",
+                    "command": self.health_check_command,
+                }
+                return True
+            success, output = run_command(
+                self.health_check_command,
+                cwd=self.project_dir,
+                timeout=300,
+                dry_run=False,
+                cancel_event=self._stop_event,
+                on_process_start=self._set_active_command,
+                on_process_end=self._clear_active_command,
+                allowed_commands=self.allowed_commands,
+                allowed_paths=self.allowed_paths,
+            )
+            self._current_cycle_health = {
+                "status": "healthy" if success else "unhealthy",
+                "mode": "command",
+                "command": self.health_check_command,
+                "output": output[:500],
+            }
+            return success
+
+        if self.health_url:
+            if self.dry_run:
+                self._current_cycle_health = {
+                    "status": "planned",
+                    "mode": "url",
+                    "url": self.health_url,
+                }
+                return True
+            success = check_health(self.health_url)
+            self._current_cycle_health = {
+                "status": "healthy" if success else "unhealthy",
+                "mode": "url",
+                "url": self.health_url,
+            }
+            return success
+
+        self._current_cycle_health = {"status": "not_configured"}
+        return True
+
+    def _verify_post_revert_health(self) -> bool:
+        """Re-check health after a revert action."""
+        if not self.health_check_enabled:
+            return True
+
+        for attempt in range(1, self.health_check_max_failures + 1):
+            if self._check_health():
+                self.sprint_logger.info("Post-revert health check passed")
+                return True
+            self.sprint_logger.warning(
+                f"Post-revert health check failed ({attempt}/{self.health_check_max_failures})"
+            )
+            if self._wait_or_stop(5):
+                break
+
+        self.sprint_logger.error("Post-revert health check did not recover")
+        return False
+
     def run(self):
         """Run the sprint loop until stopped, max_cycles, or max_hours reached."""
+        if self.dry_run:
+            self._run_dry_run()
+            return
+
         # Acquire exclusive lock to prevent concurrent sprints on the same .joshua dir
         lock_path = self.state_dir / "sprint.lock"
         lock_fd = None
@@ -302,16 +491,21 @@ class Sprint:
         log.info(f"{'='*60}")
         self.sprint_logger.info(f"CYCLE {self.cycle} — {datetime.now().isoformat(timespec='seconds')}")
         log.info(f"{'='*60}")
+        self._current_cycle_started_at = time.monotonic()
+        self._current_cycle_agent_results = {}
+        self._current_cycle_action = "skip"
+        self._current_cycle_approval = {"status": "not_required"}
+        self._current_cycle_health = {"status": "not_checked"}
 
         # Health check — only stop sprint after N consecutive failures
-        if self.health_check_enabled and self.health_url:
-            if not check_health(self.health_url):
+        if self.health_check_enabled:
+            if not self._check_health():
                 self.sprint_logger.warning("Health check failed — attempting recovery")
                 if self.recovery_deploy:
-                    self._deploy(self.recovery_deploy)
+                    self._deploy(self.recovery_deploy, action="recovery_deploy")
                     if self._wait_or_stop(10):
                         return "CAUTION"
-                if not check_health(self.health_url):
+                if not self._check_health():
                     self._consecutive_health_failures += 1
                     log.error(
                         f"Still unhealthy after recovery "
@@ -351,6 +545,7 @@ class Sprint:
 
         # Phase 1: Run all work skills
         work_outputs = {}
+        agent_timings: dict[str, dict] = {}
         for i, agent in enumerate(work_agents):
             # Stagger: wait between agents (skip before first)
             if i > 0:
@@ -361,6 +556,23 @@ class Sprint:
             output = result.output if result.success else f"[FAILED] {result.error}"
             work_outputs[agent.name] = output
             self._record_result(agent, task, result)
+            agent_timings[agent.name] = {
+                "phase": agent.phase,
+                "skill": agent.skill,
+                "duration_seconds": result.duration_seconds,
+                "exit_code": result.exit_code,
+                "success": result.success,
+                "attempts": self._last_agent_attempts,
+                "output_chars": len(result.output),
+            }
+            self._current_cycle_agent_results[agent.name] = {
+                "phase": agent.phase,
+                "skill": agent.skill,
+                "task": task[:500],
+                "success": result.success,
+                "duration_seconds": result.duration_seconds,
+                "attempts": self._last_agent_attempts,
+            }
 
         # Phase 2: Gate skills review all work outputs
         verdict = "GO" if not gate_agents else "CAUTION"
@@ -377,6 +589,23 @@ class Sprint:
             result = self._run_agent_with_retry(agent, gate_task, context)
             verdict = self._parse_verdict(result.output)
             self._record_result(agent, f"gate-cycle-{self.cycle}", result)
+            agent_timings[agent.name] = {
+                "phase": agent.phase,
+                "skill": agent.skill,
+                "duration_seconds": result.duration_seconds,
+                "exit_code": result.exit_code,
+                "success": result.success,
+                "attempts": self._last_agent_attempts,
+                "output_chars": len(result.output),
+            }
+            self._current_cycle_agent_results[agent.name] = {
+                "phase": agent.phase,
+                "skill": agent.skill,
+                "task": f"gate-cycle-{self.cycle}",
+                "success": result.success,
+                "duration_seconds": result.duration_seconds,
+                "attempts": self._last_agent_attempts,
+            }
 
             # Store gate findings for cross-agent context
             if self.cross_agent_context:
@@ -385,50 +614,99 @@ class Sprint:
         # Apply verdict
         self.stats[verdict.lower()] = self.stats.get(verdict.lower(), 0) + 1
         self.sprint_logger.info(f"VERDICT: {verdict}")
+        action = self._resolve_verdict_action(verdict)
+        self._current_cycle_action = action
 
-        if verdict == "REVERT":
+        if action == "stop":
+            self.sprint_logger.warning("Policy requested stop — sprint will end after this cycle")
+            self._stop_requested = True
+            self._stop_event.set()
+        elif action == "revert":
             self.sprint_logger.warning("REVERT — changes will not be deployed")
             if self.gate_blocking:
                 self.gate_blocked = True
-            if branch and self.git_strategy == "snapshot":
-                self.git.revert(branch)
-            self.notifier.notify_event("revert",
-                f"Cycle {self.cycle} REVERTED", self.project_name)
+            if not self._approval_needed("revert") or self._request_approval("revert", branch or self.project_name):
+                if self.revert_cmd:
+                    self._deploy(self.revert_cmd, action="revert", check_approval=False)
+                elif branch and self.git_strategy == "snapshot":
+                    self.git.revert(branch)
+                self._verify_post_revert_health()
+                self.notifier.notify_event("revert",
+                    f"Cycle {self.cycle} REVERTED", self.project_name)
+            else:
+                self.notifier.notify_event(
+                    "revert_blocked",
+                    f"Cycle {self.cycle} revert blocked by approval",
+                    self.project_name,
+                )
         else:
             self.gate_blocked = False
             if branch and self.git_strategy == "snapshot" and self.git.is_repo():
                 self.git.merge_to_main(branch)
-            if not self.no_deploy and self.deploy_cmd and verdict in ("GO", "CAUTION"):
-                if verdict == "CAUTION":
+            if not self.no_deploy and self.deploy_cmd and action in ("deploy", "deploy_with_warning"):
+                if action == "deploy_with_warning":
                     self.sprint_logger.warning("CAUTION — deploying but flagging for review")
-                self._deploy()
+                self._deploy(action=action)
 
         # Summary
         self.cycle_summaries.append({
             "cycle": self.cycle,
             "verdict": verdict,
+            "action": action,
             "timestamp": datetime.now().isoformat(),
         })
 
         # Agent timings
         self.sprint_logger.info(f"CYCLE {self.cycle} COMPLETE — verdict={verdict}")
-        self._write_cycle_event(self.cycle, verdict, {}, self.last_gate_findings)
+        elapsed_seconds = (
+            time.monotonic() - self._current_cycle_started_at
+            if self._current_cycle_started_at is not None
+            else 0.0
+        )
+        self._write_cycle_event(
+            self.cycle,
+            verdict,
+            action,
+            agent_timings,
+            self.last_gate_findings,
+            elapsed_seconds,
+        )
         return verdict
 
 
-    def _write_cycle_event(self, cycle: int, verdict: str, agent_timings: dict, gate_findings: str):
+    def _write_cycle_event(
+        self,
+        cycle: int,
+        verdict: str,
+        action: str,
+        agent_timings: dict,
+        gate_findings: str,
+        cycle_duration_seconds: float,
+    ):
         """Write structured JSON event for this cycle to .joshua/events/."""
         import json as _json
+
         events_dir = self.state_dir / "events"
-        events_dir.mkdir(exist_ok=True)
+        events_dir.mkdir(parents=True, exist_ok=True)
+        cycle_dir = events_dir / f"cycle_{cycle:04d}"
+        agents_dir = cycle_dir / "agents"
+        agents_dir.mkdir(parents=True, exist_ok=True)
         event = {
             "cycle": cycle,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "verdict": verdict,
+            "action": action,
+            "cycle_duration_seconds": round(cycle_duration_seconds, 3),
             "agent_timings": agent_timings,
+            "agents": self._current_cycle_agent_results,
+            "approval": self._current_cycle_approval,
+            "health": self._current_cycle_health,
             "gate_findings_chars": len(gate_findings),
             "stats": {
-                "total_cycles": self.stats.get("go", 0) + self.stats.get("caution", 0) + self.stats.get("revert", 0) + self.stats.get("errors", 0),
+                "total_cycles": self.stats.get("go", 0)
+                + self.stats.get("caution", 0)
+                + self.stats.get("revert", 0)
+                + self.stats.get("errors", 0),
                 "go_count": self.stats.get("go", 0),
                 "caution_count": self.stats.get("caution", 0),
                 "revert_count": self.stats.get("revert", 0),
@@ -437,6 +715,11 @@ class Sprint:
         }
         event_file = events_dir / f"cycle_{cycle:04d}.json"
         event_file.write_text(_json.dumps(event, indent=2))
+        cycle_file = cycle_dir / "event.json"
+        cycle_file.write_text(_json.dumps(event, indent=2))
+        for agent_name, payload in self._current_cycle_agent_results.items():
+            agent_file = agents_dir / f"{agent_name}.json"
+            agent_file.write_text(_json.dumps(payload, indent=2))
 
     def _stagger_wait(self, next_agent: str):
         """Wait between agent runs: memory check + fixed delay."""
@@ -451,11 +734,13 @@ class Sprint:
     def _run_agent_with_retry(self, agent: Agent, task: str,
                                context: dict) -> RunResult:
         """Run agent with configurable retries."""
+        self._last_agent_attempts = 1
         result = self._run_agent(agent, task, context)
         if result.success or not self.retries:
             return result
 
         for attempt in range(1, self.retries + 1):
+            self._last_agent_attempts = attempt + 1
             log.info(f"[{agent.name}] Retry {attempt}/{self.retries}")
             if self._wait_or_stop(5 * attempt):
                 return RunResult(
@@ -532,6 +817,7 @@ class Sprint:
             "project_dir": self.project_dir,
             "deploy_command": self.deploy_cmd,
             "health_url": self.health_url,
+            "site_url": self.site_url,
             "cycle": self.cycle,
             "gate_findings": "",
         }
@@ -563,8 +849,6 @@ class Sprint:
         Sets self.last_verdict_source to "json" | "legacy" | "default"
         so callers and APIs can distinguish how the verdict was obtained.
         """
-        VALID = ("GO", "CAUTION", "REVERT")
-
         # 1. JSON block — fenced (```json...```) or raw object, validated via GateVerdict
         from pydantic import ValidationError as _PydanticValidationError
         for pattern in (
@@ -635,19 +919,26 @@ class Sprint:
         )
         return "CAUTION"
 
-    def _deploy(self, cmd: str | None = None):
+    def _deploy(self, cmd: str | None = None, action: str = "deploy", check_approval: bool = True):
         """Run a deploy command safely (no shell=True)."""
         deploy_cmd = cmd or self.deploy_cmd
         if not deploy_cmd:
+            return
+        if self.no_deploy:
+            self.sprint_logger.info(f"[no-deploy] Skipping {action}: {deploy_cmd}")
+            return
+        if check_approval and not self._request_approval(action, deploy_cmd):
             return
         success, output = run_command(
             deploy_cmd,
             cwd=self.project_dir,
             timeout=300,
-            dry_run=self.no_deploy,
+            dry_run=False,
             cancel_event=self._stop_event,
             on_process_start=self._set_active_command,
             on_process_end=self._clear_active_command,
+            allowed_commands=self.allowed_commands,
+            allowed_paths=self.allowed_paths,
         )
         if not success and not self.no_deploy:
             log.error(f"Deploy failed: {output}")
