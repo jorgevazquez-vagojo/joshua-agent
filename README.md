@@ -4,7 +4,7 @@
 
 | Signal | Status |
 | --- | --- |
-| Package | `1.3.0` |
+| Package | `1.4.0` |
 | Tests | `303 pytest tests`; CI runs on Python `3.11`, `3.12`, `3.13` |
 | Release path | GitHub Actions CI + PyPI publish workflow |
 
@@ -405,6 +405,53 @@ joshua export .joshua --cycles 5        # Last 5 cycles only
 joshua distill .joshua1 .joshua2        # Consolidate lessons across multiple sprints
 ```
 
+### Environment comparison
+
+```bash
+joshua compare dev.yaml pre.yaml pro.yaml           # Compare existing results side by side
+joshua compare dev.yaml pre.yaml pro.yaml --run      # Run one QA cycle first, then compare
+joshua compare dev.yaml pre.yaml pro.yaml --run --parallel  # Run all envs concurrently
+joshua compare dev.yaml pre.yaml pro.yaml -f markdown       # GFM table (for reports, Jira, etc.)
+joshua compare dev.yaml pre.yaml pro.yaml -f json           # JSON output (for CI/dashboards)
+joshua compare dev.yaml pre.yaml pro.yaml -o report.md -f markdown  # Save to file
+```
+
+`compare` reads `.joshua/checkpoint.json` and `.joshua/results.tsv` from each config's state directory and renders a side-by-side verdict matrix. The first environment is the **baseline** — regressions against it are flagged automatically.
+
+**Example output (`--format table`):**
+
+```
+Environment comparison — 2026-04-08 14:55
+──────────────────────────────────────────────────────────────────────────────
+Environment    Verdict          Cycle   Conf  Dur(s)  vs base   Top finding
+──────────────────────────────────────────────────────────────────────────────
+dev            ✓  GO              12   0.92   142.3  =          Auth fix deployed OK
+pre            ⚠  CAUTION          9   0.71   189.1  ▼ worse    DB pool size warning
+pro            ✗  REVERT           7   0.97     —    ▼ worse    SQL injection in /search
+──────────────────────────────────────────────────────────────────────────────
+→ REVERT in one or more environments — block promotion
+```
+
+Column reference:
+
+| Column | Description |
+|--------|-------------|
+| `Environment` | Config filename (without `.yaml`) |
+| `Verdict` | Last gate verdict from `checkpoint.json` |
+| `Cycle` | Cycle number when verdict was issued |
+| `Conf` | Gate confidence score (0–1) |
+| `Dur(s)` | Average cycle duration in seconds |
+| `vs base` | Regression vs first environment (`=` same · `▲ better` · `▼ worse`) |
+| `Top finding` | First line of last gate findings |
+
+Summary line logic:
+
+| Condition | Summary |
+|-----------|---------|
+| All envs GO | `→ All environments GO — ready to promote` |
+| Any REVERT | `→ REVERT in one or more environments — block promotion` |
+| Any CAUTION, no REVERT | `→ CAUTION in one or more environments — review before promoting` |
+
 ### Automation
 
 ```bash
@@ -451,6 +498,97 @@ Runs your CI-equivalent autonomously — auto-deploys on GO, reverts on REVERT, 
 
 Agents: `analyst` (review documents), `legal` (compliance check), `executive` (summary + gate).
 Multi-agent review cycle for contracts, policies, or technical specs. No deploy command needed — the gate verdict determines whether the document passes or requires revision. Example: [`examples/legal-review.yaml`](examples/legal-review.yaml).
+
+### Pack 4: Client QA Across Environments (DEV / PRE / PRO)
+
+Ideal for agencies running QA as a service on behalf of a client. Each environment gets its own config file. Runs are point-in-time (one review cycle, not continuous) triggered by your CI pipeline or manually before a release.
+
+**Setup — one config per environment:**
+
+```yaml
+# dev.yaml
+project:
+  name: client-app-dev
+  path: ~/client-app
+  health_url: https://dev.client.com/health
+  objective_metric: "pytest tests/smoke/ --tb=no -q | tail -1"
+
+agents:
+  researcher:
+    skill: dev
+    system_prompt: |
+      You are a QA analyst reviewing the DEV environment of {project_name}.
+      Check for functional regressions, broken flows, and performance issues.
+    tasks:
+      - "Audit all critical user flows and flag any regressions"
+  qa:
+    skill: qa
+    phase: gate
+    verdict_format: true
+
+sprint:
+  trigger: on_demand       # Only runs when explicitly triggered — no idle cycles
+  max_cycles: 1            # One review pass, then stop
+  gate_blocking: true
+```
+
+Duplicate `dev.yaml` → `pre.yaml` → `pro.yaml`, adjusting `project.name`, `health_url`, and `path` for each environment.
+
+**Run QA across all three environments:**
+
+```bash
+# Option A — compare existing results (no new LLM calls)
+joshua compare dev.yaml pre.yaml pro.yaml
+
+# Option B — run a fresh QA cycle on each, then compare
+joshua compare dev.yaml pre.yaml pro.yaml --run
+
+# Option C — run all three in parallel (faster), then compare
+joshua compare dev.yaml pre.yaml pro.yaml --run --parallel
+
+# Export results as a Markdown report for the client
+joshua compare dev.yaml pre.yaml pro.yaml -f markdown -o qa-report-$(date +%F).md
+```
+
+**Example output:**
+
+```
+Environment comparison — 2026-04-08 14:55
+──────────────────────────────────────────────────────────────────────────────
+Environment    Verdict          Cycle   Conf  Dur(s)  vs base   Top finding
+──────────────────────────────────────────────────────────────────────────────
+dev            ✓  GO              1    0.94   138.2  =          All smoke tests pass
+pre            ⚠  CAUTION         1    0.78   201.4  ▼ worse    Slow checkout (3.2s avg)
+pro            ✓  GO              1    0.91   144.0  =          No regressions found
+──────────────────────────────────────────────────────────────────────────────
+→ CAUTION in one or more environments — review before promoting
+```
+
+**Delivering results to the client:**
+
+The Markdown report (`-f markdown -o report.md`) is ready to paste into Confluence, Jira, Notion, or send by email. For automated delivery, pipe the output through your existing notification system or attach the file in CI.
+
+**Scheduling (SLA):**
+
+Add to your CI pipeline to run QA automatically before each release:
+
+```yaml
+# .github/workflows/qa.yml
+- name: Environment QA comparison
+  run: |
+    pip install joshua-agent
+    joshua compare dev.yaml pre.yaml pro.yaml --run --parallel \
+      -f markdown -o qa-report.md
+- name: Upload QA report
+  uses: actions/upload-artifact@v4
+  with:
+    name: qa-report
+    path: qa-report.md
+```
+
+Or use `joshua fleet` with `parallel: true` if you want full sprint logs per environment in addition to the comparison summary.
+
+> **Note on functional testing:** joshua-agent's QA agents are LLM-based reviewers — they analyze code, logs, and output. For browser-level functional testing (Playwright, Cypress, Selenium), run your test suite as the `objective_metric` command and let the gate interpret the results. Example: `objective_metric: "npx playwright test --reporter=line 2>&1 | grep -E 'passed|failed' | tail -1"`
 
 ## Architecture
 

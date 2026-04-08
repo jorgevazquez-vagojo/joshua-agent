@@ -1259,5 +1259,225 @@ def tutorial():
     click.echo("")
 
 
+@main.command()
+@click.argument("configs", nargs=-1, type=click.Path(exists=True), required=True)
+@click.option("--run/--no-run", "do_run", default=False,
+              help="Run one QA cycle per environment before comparing (default: compare existing results)")
+@click.option("--parallel", is_flag=True, help="Run environments concurrently (only with --run)")
+@click.option("--format", "-f", "fmt", type=click.Choice(["table", "markdown", "json"]),
+              default="table", help="Output format (default: table)")
+@click.option("--output", "-o", default="", help="Write report to file instead of stdout")
+def compare(configs: tuple, do_run: bool, parallel: bool, fmt: str, output: str):
+    """Compare QA results across multiple environments side by side.
+
+    Reads existing sprint results (or runs one fresh cycle with --run) for each
+    config and produces a verdict comparison table — useful for DEV / PRE / PRO
+    QA pipelines.
+
+    \b
+    Example:
+      joshua compare dev.yaml pre.yaml pro.yaml
+      joshua compare dev.yaml pre.yaml pro.yaml --run
+      joshua compare *.yaml --run --parallel
+      joshua compare dev.yaml pre.yaml --format markdown --output report.md
+    """
+    import json as _json
+    import csv as _csv
+    import io as _io
+    from datetime import datetime as _dt
+
+    # ── Optionally run one cycle per environment ───────────────────────
+    if do_run:
+        import logging
+        from joshua.config import load_config
+        from joshua.sprint import Sprint
+
+        def _run_one(config_path: str) -> None:
+            log = logging.getLogger("joshua")
+            cfg = load_config(config_path)
+            cfg.setdefault("sprint", {})["max_cycles"] = 1
+            sprint = Sprint(cfg)
+            sprint.run()
+
+        if parallel and len(configs) > 1:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            click.echo(f"  Running {len(configs)} environments in parallel...")
+            with ThreadPoolExecutor(max_workers=len(configs)) as ex:
+                futures = {ex.submit(_run_one, c): c for c in configs}
+                for fut in as_completed(futures):
+                    cfg_path = futures[fut]
+                    try:
+                        fut.result()
+                        click.echo(f"  ✓ {Path(cfg_path).stem}")
+                    except Exception as e:
+                        click.echo(f"  ✗ {Path(cfg_path).stem}: {e}")
+        else:
+            for cfg_path in configs:
+                click.echo(f"  Running {Path(cfg_path).stem}...")
+                try:
+                    _run_one(cfg_path)
+                    click.echo(f"  ✓ {Path(cfg_path).stem} done")
+                except Exception as e:
+                    click.echo(f"  ✗ {Path(cfg_path).stem}: {e}")
+        click.echo("")
+
+    # ── Read results for each environment ─────────────────────────────
+    from joshua.config import load_config
+
+    _VERDICT_ORDER = {"GO": 0, "CAUTION": 1, "REVERT": 2}
+
+    rows: list[dict] = []
+    for cfg_path in configs:
+        try:
+            cfg = load_config(cfg_path)
+        except Exception as e:
+            rows.append({"env": Path(cfg_path).stem, "error": str(e)})
+            continue
+
+        env_name = cfg.get("project", {}).get("name", Path(cfg_path).stem)
+        state_dir = Path(cfg["project"]["path"]).expanduser() / ".joshua"
+
+        # checkpoint.json
+        cp_path = state_dir / "checkpoint.json"
+        cp: dict = {}
+        if cp_path.exists():
+            try:
+                cp = _json.loads(cp_path.read_text())
+            except Exception:
+                pass
+
+        # last row from results.tsv
+        tsv_path = state_dir / "results.tsv"
+        last_row: dict = {}
+        if tsv_path.exists():
+            try:
+                content = tsv_path.read_text(encoding="utf-8", errors="replace")
+                reader = _csv.DictReader(_io.StringIO(content), delimiter="\t")
+                for r in reader:
+                    last_row = dict(r)
+            except Exception:
+                pass
+
+        verdict = (cp.get("last_verdict") or last_row.get("verdict") or "—").upper()
+        cycle = cp.get("cycle", last_row.get("cycle", "—"))
+        confidence = last_row.get("confidence", cp.get("last_gate_confidence", "—"))
+        duration = last_row.get("duration_s", "—")
+        metric_before = last_row.get("metric_before", "—")
+        metric_after = last_row.get("metric_after", "—")
+        findings = (cp.get("last_gate_findings") or last_row.get("description") or "")
+        findings_short = (findings[:60] + "…") if len(findings) > 60 else findings
+
+        rows.append({
+            "env": env_name,
+            "verdict": verdict,
+            "cycle": cycle,
+            "confidence": confidence,
+            "duration_s": duration,
+            "metric_before": metric_before,
+            "metric_after": metric_after,
+            "findings": findings_short,
+            "error": "",
+        })
+
+    # ── Compute regressions vs first env ──────────────────────────────
+    baseline_verdict = rows[0].get("verdict", "—") if rows else "—"
+    for i, row in enumerate(rows):
+        if row.get("error"):
+            row["regression"] = "error"
+            continue
+        v = row.get("verdict", "—")
+        b = baseline_verdict
+        if v == "—" or b == "—":
+            row["regression"] = "—"
+        elif _VERDICT_ORDER.get(v, 99) > _VERDICT_ORDER.get(b, 99):
+            row["regression"] = "worse"
+        elif _VERDICT_ORDER.get(v, 99) < _VERDICT_ORDER.get(b, 99):
+            row["regression"] = "better"
+        else:
+            row["regression"] = "same"
+
+    # ── Render ────────────────────────────────────────────────────────
+    _VERDICT_SYMBOL = {"GO": "✓  GO", "CAUTION": "⚠  CAUTION", "REVERT": "✗  REVERT"}
+    _REG_SYMBOL = {"worse": "▼ worse", "better": "▲ better", "same": "=", "—": "—", "error": "ERR"}
+
+    if fmt == "json":
+        result = _json.dumps({"generated_at": _dt.now().isoformat(timespec="seconds"),
+                              "environments": rows}, indent=2)
+
+    elif fmt == "markdown":
+        headers = ["Environment", "Verdict", "Cycle", "Confidence", "Duration (s)",
+                   "Metric before→after", "vs baseline", "Top finding"]
+        lines = [
+            f"# Environment Comparison — {_dt.now().strftime('%Y-%m-%d %H:%M')}",
+            "",
+            "| " + " | ".join(headers) + " |",
+            "| " + " | ".join("---" for _ in headers) + " |",
+        ]
+        for row in rows:
+            if row.get("error"):
+                lines.append(f"| {row['env']} | ERROR: {row['error']} | | | | | | |")
+                continue
+            metric = f"{row['metric_before']}→{row['metric_after']}"
+            lines.append(
+                f"| {row['env']} "
+                f"| **{row['verdict']}** "
+                f"| {row['cycle']} "
+                f"| {row['confidence']} "
+                f"| {row['duration_s']} "
+                f"| {metric} "
+                f"| {_REG_SYMBOL.get(row['regression'], '—')} "
+                f"| {row['findings']} |"
+            )
+        result = "\n".join(lines)
+
+    else:  # table (default)
+        col_env = max(len("Environment"), max(len(r["env"]) for r in rows))
+        lines: list[str] = []
+        lines.append("")
+        lines.append(f"  Environment comparison — {_dt.now().strftime('%Y-%m-%d %H:%M')}")
+        sep = "  " + "─" * (col_env + 52)
+        lines.append(sep)
+        lines.append(
+            f"  {'Environment':<{col_env}}  {'Verdict':<14}  {'Cycle':>5}  "
+            f"{'Conf':>5}  {'Dur(s)':>7}  {'vs base':<10}  Top finding"
+        )
+        lines.append(sep)
+        for row in rows:
+            if row.get("error"):
+                lines.append(f"  {row['env']:<{col_env}}  ERROR: {row['error']}")
+                continue
+            verdict_str = _VERDICT_SYMBOL.get(row["verdict"], row["verdict"])
+            reg_str = _REG_SYMBOL.get(row.get("regression", "—"), "—")
+            conf = str(row["confidence"])[:5] if row["confidence"] != "—" else "—"
+            dur = str(row["duration_s"])[:7] if row["duration_s"] != "—" else "—"
+            lines.append(
+                f"  {row['env']:<{col_env}}  {verdict_str:<14}  "
+                f"{str(row['cycle']):>5}  {conf:>5}  {dur:>7}  "
+                f"{reg_str:<10}  {row['findings']}"
+            )
+        lines.append(sep)
+
+        # Summary line
+        verdicts = [r.get("verdict") for r in rows if not r.get("error") and r.get("verdict") != "—"]
+        if verdicts:
+            all_go = all(v == "GO" for v in verdicts)
+            any_revert = any(v == "REVERT" for v in verdicts)
+            if all_go:
+                summary = "All environments GO — ready to promote"
+            elif any_revert:
+                summary = "REVERT in one or more environments — block promotion"
+            else:
+                summary = "CAUTION in one or more environments — review before promoting"
+            lines.append(f"  → {summary}")
+        lines.append("")
+        result = "\n".join(lines)
+
+    if output:
+        Path(output).write_text(result, encoding="utf-8")
+        click.echo(f"Report written to: {output}")
+    else:
+        click.echo(result)
+
+
 if __name__ == "__main__":
     main()

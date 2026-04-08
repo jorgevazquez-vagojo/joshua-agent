@@ -2,6 +2,12 @@
 
 All notable changes to joshua-agent are documented here.
 
+## [1.4.0] — 2026-04-08
+
+### Added
+- **`joshua compare`**: side-by-side environment comparison for multi-environment QA (DEV/PRE/PRO). Reads existing sprint results from each config's `.joshua/` state directory and renders a verdict matrix with regression analysis. Options: `--run` (execute one QA cycle before comparing), `--parallel` (concurrent execution via ThreadPoolExecutor), `--format table|markdown|json` (output format), `--output FILE` (write to file). The first environment is the baseline — regressions flagged with `▼ worse`, improvements with `▲ better`. Summary line: "All environments GO — ready to promote" / "REVERT — block promotion" / "CAUTION — review before promoting".
+- **Pack 4 use case in README**: end-to-end client QA guide for multi-environment setups. Covers config patterns (`trigger: on_demand`, `max_cycles: 1`), `--run --parallel` workflow, Markdown report delivery, CI/CD scheduling, and a note on integrating Playwright/Cypress/Selenium via `objective_metric`.
+
 ## [1.3.0] — 2026-04-08
 
 ### Added
