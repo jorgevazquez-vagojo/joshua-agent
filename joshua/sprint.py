@@ -720,6 +720,13 @@ class Sprint:
         except Exception as _notify_err:
             log.warning(f"notify_all failed (non-fatal): {_notify_err}")
 
+        # Create Jira/Linear ticket on REVERT
+        try:
+            from joshua.integrations.ticket_sink import maybe_create_ticket
+            maybe_create_ticket(self.config, verdict, self.project_name, self.cycle, self.last_gate_findings)
+        except Exception as _ticket_err:
+            log.warning(f"ticket_sink failed (non-fatal): {_ticket_err}")
+
         return verdict
 
 

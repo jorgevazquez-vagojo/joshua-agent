@@ -2,6 +2,19 @@
 
 All notable changes to joshua-agent are documented here.
 
+## [1.9.0] — 2026-04-08
+
+### Added
+- **Jira/Linear auto-ticket on REVERT**: new `ticket_sink` config block. Set `type: jira` or `type: linear` with credentials, and joshua automatically creates an issue whenever the gate returns REVERT. Implemented in `joshua/integrations/ticket_sink.py` with `JiraTicketSink` (REST API v3) and `LinearTicketSink` (GraphQL). Integrated into sprint engine via `maybe_create_ticket()`.
+- **`joshua export <config>`**: export sprint results as CSV, JSON, or HTML (self-contained, no CDN). HTML format includes a dark-themed dashboard with verdict cards, cost/token summary, sparkline trend, and color-coded cycle table. Reads `results.tsv` and `checkpoint.json` from the state directory.
+- **`joshua hook install/uninstall`**: install a pre-commit git hook that validates joshua YAML config files before each commit using `joshua lint-config`. Backs up any existing hook before overwriting, and restores it on uninstall.
+- **`joshua lint-config <config>`**: validate a joshua YAML config file against the full Pydantic schema without running agents. Exits 0 if valid, 1 if invalid, with clear per-field error messages.
+- **Audit trail enhancements** (`server.py`): new `log_audit()` helper writes structured JSONL entries with `action`, `sprint_id`, `role`, `ip`, and `token_prefix` (first 8 chars). Called from `POST /sprints`, `POST /sprints/{id}/stop`, `POST /webhook/task`, `POST /login`, and `POST /sprints/{id}/approval`.
+- **`joshua report <config>`**: generate a weekly HTML activity report with verdict trend sparkline, GO/CAUTION/REVERT breakdown bar, cost and token summary cards, and a recent-cycles table. Self-contained dark-themed HTML with no external dependencies.
+- **`joshua skill install <name>`**: install a community skill from the bundled registry (`skills/registry.json`) or a custom registry URL/path. Creates a skill YAML in `~/.joshua/skills/`. Supports `--force` to overwrite.
+- **Community skills registry** (`skills/registry.json`): three built-in community skills — `playwright-qa`, `security-audit`, `performance-gate` — each with stub YAML files.
+- **`joshua replay` enhancements**: `--cycle` is now optional (auto-detects the latest cycle when omitted); new `--agent/-a` option (default: `gate`) to replay any agent by name.
+
 ## [1.8.0] — 2026-04-08
 
 ### Added

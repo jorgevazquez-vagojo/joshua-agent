@@ -1,0 +1,23 @@
+{
+  "playwright-qa": {
+    "name": "playwright-qa",
+    "description": "End-to-end QA agent using Playwright browser automation",
+    "version": "1.0.0",
+    "author": "joshua-community",
+    "url": ""
+  },
+  "security-audit": {
+    "name": "security-audit",
+    "description": "Security analyst that audits code for OWASP Top-10 vulnerabilities",
+    "version": "1.0.0",
+    "author": "joshua-community",
+    "url": ""
+  },
+  "performance-gate": {
+    "name": "performance-gate",
+    "description": "Performance gate that checks Core Web Vitals and API latency budgets",
+    "version": "1.0.0",
+    "author": "joshua-community",
+    "url": ""
+  }
+}

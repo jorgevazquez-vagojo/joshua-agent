@@ -144,6 +144,16 @@ class HooksConfig(BaseModel):
     model_config = {"extra": "allow"}  # allow pre_run, post_deploy, etc.
 
 
+class TicketSinkConfig(BaseModel):
+    type: str = ""           # "jira" or "linear"
+    base_url: str = ""       # Jira only
+    email: str = ""          # Jira only
+    token: str = ""
+    project_key: str = ""    # Jira only
+    team_id: str = ""        # Linear only
+    issue_type: str = "Bug"  # Jira only
+
+
 class JoshuaConfig(BaseModel):
     project: ProjectConfig
     runner: RunnerConfig = Field(default_factory=RunnerConfig)
@@ -154,6 +164,7 @@ class JoshuaConfig(BaseModel):
     preflight: PreflightConfig = Field(default_factory=PreflightConfig)
     tracker: TrackerConfig = Field(default_factory=TrackerConfig)
     hooks: HooksConfig = Field(default_factory=HooksConfig)
+    ticket_sink: TicketSinkConfig = Field(default_factory=TicketSinkConfig)
 
     @field_validator("agents")
     @classmethod

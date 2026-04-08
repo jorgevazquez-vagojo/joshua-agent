@@ -157,6 +157,25 @@ async def audit_log(request: Request, call_next):
     return response
 
 
+def log_audit(action: str, sprint_id: str = "", role: str = "", ip: str = "", token: str = "") -> None:
+    """Write a structured audit entry for security-sensitive actions."""
+    try:
+        import json as _json
+        _AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "ts": datetime.now().isoformat(timespec="milliseconds"),
+            "action": action,
+            "sprint_id": sprint_id,
+            "role": role,
+            "ip": ip,
+            "token_prefix": token[:8] if token else "anonymous",
+        }
+        with open(_AUDIT_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(_json.dumps(entry) + "\n")
+    except Exception:
+        pass  # never let audit log break the request
+
+
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     """Add security headers and enforce rate limiting."""
@@ -568,6 +587,7 @@ def start_sprint(req: StartSprintRequest):
     _db.update_pid(sprint_id, pid)
 
     log.info(f"Sprint {sprint_id} started for {project_name} (pid={pid})")
+    log_audit("sprint.start", sprint_id=sprint_id, role="api")
 
     row = _db.get_sprint(sprint_id)
     return _status_from_db(row, _pm)
@@ -602,6 +622,7 @@ def stop_sprint(sprint_id: str):
     stopped = _pm.stop(sprint_id)
     if stopped:
         _db.update_worker_state(sprint_id, "stopping")
+    log_audit("sprint.stop", sprint_id=sprint_id, role="api")
     return StopResponse(sprint_id=sprint_id, stopped=stopped)
 
 
@@ -812,6 +833,7 @@ async def webhook_task(req: WebhookTaskRequest):
     tasks.append(req.task)
     tasks_path.write_text(_json.dumps(tasks))
     log.info(f"Webhook task queued for sprint {req.sprint_id}: {req.task[:80]}")
+    log_audit("webhook.task", sprint_id=req.sprint_id, role="api")
     return {"queued": True, "queue_length": len(tasks)}
 
 
@@ -914,8 +936,11 @@ async def login_submit(request: Request):
     form = await request.form()
     token = form.get("token", "")
     role = _ROLE_MAP.get(token) if _ROLE_MAP else "admin"
+    ip = request.client.host if request.client else ""
     if role is None:
+        log_audit("login.failed", ip=ip, token=token)
         return HTMLResponse(_LOGIN_HTML + '<script>document.write("<p class=err>Invalid token.</p>")</script>')
+    log_audit("login.success", role=role, ip=ip, token=token)
     resp = RedirectResponse(url="/ui", status_code=303)
     resp.set_cookie("joshua_token", token, httponly=True, samesite="lax")
     return resp
@@ -975,6 +1000,7 @@ def post_approval(sprint_id: str, req: ApprovalRequest):
     decision = {"approved": req.approved, "timestamp": datetime.now().isoformat()}
     approval_path.write_text(_json.dumps(decision, indent=2))
     log.info(f"Approval for sprint {sprint_id}: approved={req.approved}")
+    log_audit("sprint.approval", sprint_id=sprint_id, role="operator")
     return {"ok": True, "approved": req.approved}
 
 
