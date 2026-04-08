@@ -2,6 +2,22 @@
 
 All notable changes to joshua-agent are documented here.
 
+## [1.11.0] — 2026-04-08
+
+### Added
+- **`joshua secure <config>`**: scan sprint YAML for hardcoded secrets and tokens using regex patterns. Detects generic key/token/password fields, URLs with embedded credentials, Slack tokens (`xoxb-`/`xoxp-`), and GitHub tokens (`ghp_`/`github_pat_`). Outputs a findings table with line numbers and truncated values. `--fix` suggests `export ENV_VAR` replacements. Exits 1 if secrets found, 0 if clean.
+- **Signed verdicts (HMAC)**: `results.tsv` now includes `timestamp` and `signature` columns. HMAC-SHA256 is computed over `cycle|verdict|confidence|timestamp` using `JOSHUA_SIGNING_KEY` env var. Feature is opt-in — empty key = empty signature. New module `joshua/utils/signing.py` with `sign_entry()` and `verify_entry()`.
+- **`joshua verify-audit <project_dir>`**: reads `results.tsv` and verifies each row's HMAC signature. Reports OK/INVALID per row. Exits 1 if any signature is invalid.
+- **Rate limiting (`check_rate_limit`)**: explicit `check_rate_limit(token_prefix)` function in `server.py` alongside the existing middleware. Allows per-endpoint rate-limit enforcement (60 req/60s window). Returns `True` if allowed, `False` if rate limited.
+- **`joshua test-agent <config> --agent <name>`**: debug agent prompts with a synthetic task. Shows system prompt (blue) and task (green). Default `--dry-run` shows prompt without executing; `--no-dry-run` runs the real agent.
+- **`slack-app.yml`**: Slack app manifest for registering the Joshua QA Slack app. Includes `/joshua` slash command, `app_mention` event, and incoming webhook OAuth scopes.
+- **Spinner during sprint**: animated braille spinner shown on stderr while sprint runs (only in TTY). Uses a background thread — non-blocking.
+- **Verdict summary box**: ASCII box shown at end of `joshua run` with verdict (color-coded), confidence, and duration. Shown only in TTY; plain text in CI.
+- **`joshua tutorial`**: interactive step-by-step guided tutorial covering `init`, `doctor`, `explain`, `run --dry-run`, server, and next steps.
+- **`joshua completion <shell>`**: prints shell completion setup instructions and the eval command for bash/zsh/fish.
+- **`joshua tips`**: prints a random joshua usage tip.
+- **`friendly_error()`**: helper that converts common exceptions (FileNotFoundError, YAML parse errors, ValidationError, ConnectionRefusedError) to actionable messages with suggested next commands.
+
 ## [1.10.0] — 2026-04-08
 
 ### Added

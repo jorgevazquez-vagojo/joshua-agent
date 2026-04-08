@@ -117,7 +117,47 @@ def run(config: str, max_cycles: int, max_hours: float, dry_run: bool, no_deploy
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
 
-    sprint.run()
+    import time as _time_run
+    _run_start = _time_run.monotonic()
+
+    if sys.stderr.isatty():
+        with Spinner(f"Sprint: {cfg['project']['name']}"):
+            sprint.run()
+    else:
+        sprint.run()
+
+    _run_duration = _time_run.monotonic() - _run_start
+    _dur_m = int(_run_duration // 60)
+    _dur_s = int(_run_duration % 60)
+
+    # Summary verdict box
+    _last_verdict = getattr(sprint, "_last_verdict", None) or ""
+    _last_confidence = getattr(sprint, "last_gate_confidence", None)
+    _project_name = cfg["project"]["name"]
+    _cycle = getattr(sprint, "cycle", 0)
+
+    if sys.stdout.isatty():
+        _COLOR = {
+            "GO": "\033[92m",
+            "CAUTION": "\033[93m",
+            "REVERT": "\033[91m",
+        }.get(_last_verdict.upper(), "\033[0m")
+        _RESET = "\033[0m"
+        _conf_str = f"Confidence: {int(_last_confidence * 100)}%" if _last_confidence is not None else ""
+        _dur_str = f"Duration: {_dur_m}m {_dur_s}s"
+        _verdict_line = f"  {_COLOR}{'✅' if _last_verdict.upper() == 'GO' else '⚠️' if _last_verdict.upper() == 'CAUTION' else '🔴'}  {_last_verdict.upper()}{_RESET}"
+        _width = 42
+        click.echo("\n" + "╔" + "═" * _width + "╗")
+        click.echo("║" + f"  JOSHUA QA — {_project_name}  cycle {_cycle}".ljust(_width) + "║")
+        click.echo("║" + " " * _width + "║")
+        click.echo("║" + _verdict_line.ljust(_width + len(_COLOR) + len(_RESET)) + "║")
+        if _conf_str:
+            click.echo("║" + f"  {_conf_str}".ljust(_width) + "║")
+        click.echo("║" + f"  {_dur_str}".ljust(_width) + "║")
+        click.echo("╚" + "═" * _width + "╝\n")
+    else:
+        # Plain format for CI
+        click.echo(f"JOSHUA QA — {_project_name} cycle {_cycle} | verdict={_last_verdict} | duration={_dur_m}m{_dur_s}s")
 
 
 @main.command()
@@ -3972,6 +4012,349 @@ def upgrade(yes, check, target_version):
         click.echo(result.stderr)
         click.echo(f"\nTry manually: pip install --upgrade {pkg}")
         sys.exit(1)
+
+
+# ── v1.11.0 Security & UX commands ────────────────────────────────────────
+
+
+def friendly_error(e: Exception) -> str:
+    """Convert common exceptions to friendly messages with suggestions."""
+    msg = str(e)
+    if "FileNotFoundError" in type(e).__name__ or "No such file" in msg:
+        return (
+            f"❌ Config file not found.\n"
+            f"   Run 'joshua init' to create one, or specify path: joshua run myconfig.yaml"
+        )
+    if "yaml" in type(e).__module__:
+        return f"❌ Invalid YAML in config:\n   {msg}\n   Run 'joshua lint-config' to check."
+    if "ValidationError" in type(e).__name__:
+        return f"❌ Config validation error:\n   {msg}\n   Run 'joshua explain' for field help."
+    if "ConnectionRefusedError" in type(e).__name__:
+        return f"❌ Cannot connect. Is the server running?\n   Start with: joshua serve"
+    return f"❌ {msg}"
+
+
+# ── Spinner ────────────────────────────────────────────────────────────────
+
+import itertools
+import threading
+import time as _time_mod
+
+
+class Spinner:
+    def __init__(self, message: str = "Running"):
+        self.message = message
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._spin, daemon=True)
+
+    def _spin(self):
+        for char in itertools.cycle("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"):
+            if self._stop.is_set():
+                break
+            sys.stderr.write(f"\r{char} {self.message}...")
+            sys.stderr.flush()
+            _time_mod.sleep(0.1)
+        sys.stderr.write("\r" + " " * 60 + "\r")
+        sys.stderr.flush()
+
+    def start(self):
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        self._thread.join()
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, *_):
+        self.stop()
+
+
+# ── joshua secure ──────────────────────────────────────────────────────────
+
+@main.command("secure")
+@click.argument("config", default="joshua.yaml")
+@click.option("--fix", is_flag=True, help="Suggest env-var replacements")
+def secure(config, fix):
+    """Scan sprint config for hardcoded secrets and tokens."""
+    import re as _re
+
+    try:
+        config_text = Path(config).read_text()
+    except FileNotFoundError:
+        click.echo(friendly_error(FileNotFoundError(f"No such file: {config}")))
+        sys.exit(1)
+
+    patterns = [
+        # Generic key/token/secret/password assignments
+        (r"(?i)(token|secret|password|key|api_key|webhook|auth)\s*[:=]\s*['\"]?([A-Za-z0-9+/\-_]{16,})['\"]?",
+         "potential secret"),
+        # URLs with embedded credentials
+        (r"https?://[^:]+:[^@]{8,}@", "URL with credentials"),
+        # Slack tokens
+        (r"(xoxb-|xoxp-)[A-Za-z0-9\-]+", "Slack token"),
+        # GitHub tokens
+        (r"(ghp_|github_pat_)[A-Za-z0-9]+", "GitHub token"),
+    ]
+
+    findings = []
+    for lineno, line in enumerate(config_text.splitlines(), 1):
+        for pattern, kind in patterns:
+            m = _re.search(pattern, line)
+            if m:
+                # Extract the matched secret value (group 2 when available, else full match)
+                try:
+                    raw = m.group(2)
+                except IndexError:
+                    raw = m.group(0)
+                preview = raw[:8] + "***" if len(raw) > 8 else raw
+                # Infer field name for --fix suggestion
+                field_match = _re.match(r"\s*([A-Za-z0-9_]+)\s*[:=]", line)
+                field = field_match.group(1) if field_match else "UNKNOWN"
+                findings.append({
+                    "line": lineno,
+                    "field": field,
+                    "preview": preview,
+                    "kind": kind,
+                    "raw": raw,
+                })
+                break  # one finding per line
+
+    if not findings:
+        click.echo(f"✓ No secrets found in {config} — clean!")
+        sys.exit(0)
+
+    click.echo(f"\n⚠️  Found {len(findings)} potential secret(s) in {config}:\n")
+    click.echo(f"  {'LINE':<6} {'FIELD':<20} {'VALUE':<20} {'TYPE'}")
+    click.echo(f"  {'─'*6} {'─'*20} {'─'*20} {'─'*20}")
+    for f in findings:
+        click.echo(f"  {f['line']:<6} {f['field']:<20} {f['preview']:<20} {f['kind']}")
+
+    if fix:
+        click.echo("\n💡 Suggested replacements:\n")
+        for f in findings:
+            env_var = f["field"].upper().replace("-", "_")
+            click.echo(f"  export {env_var}=\"{f['raw']}\"")
+            click.echo(f"  # Then replace in {config}: {f['field']}: ${{{env_var}}}")
+
+    click.echo("")
+    sys.exit(1)
+
+
+# ── joshua verify-audit ────────────────────────────────────────────────────
+
+@main.command("verify-audit")
+@click.argument("project_dir", type=click.Path(), default=".joshua")
+def verify_audit(project_dir):
+    """Verify HMAC signatures in results.tsv audit log."""
+    import csv as _csv
+    from joshua.utils.signing import verify_entry
+
+    signing_key = __import__("os").environ.get("JOSHUA_SIGNING_KEY", "")
+    tsv_path = Path(project_dir) / "results.tsv"
+    if not tsv_path.exists():
+        click.echo(f"No results.tsv found in {project_dir}")
+        sys.exit(1)
+
+    ok_count = 0
+    fail_count = 0
+    with open(tsv_path, newline="") as f:
+        reader = _csv.DictReader(f, delimiter="\t")
+        for row in reader:
+            cycle = row.get("cycle", "?")
+            verdict = row.get("verdict", "?")
+            confidence = row.get("confidence", "")
+            timestamp = row.get("timestamp", "")
+            signature = row.get("signature", "")
+            entry_str = f"{cycle}|{verdict}|{confidence}|{timestamp}"
+            if verify_entry(entry_str, signature, signing_key):
+                ok_count += 1
+                status = "✓"
+            else:
+                fail_count += 1
+                status = "✗ INVALID"
+            click.echo(f"  {status}  cycle={cycle} verdict={verdict} ts={timestamp}")
+
+    click.echo(f"\n  {ok_count} OK, {fail_count} INVALID")
+    if fail_count:
+        sys.exit(1)
+
+
+# ── joshua test-agent ──────────────────────────────────────────────────────
+
+@main.command("test-agent")
+@click.argument("config", default="joshua.yaml")
+@click.option("--agent", "agent_name", default=None, help="Agent name to test")
+@click.option("--task", default="Add a hello world function to utils.py", help="Synthetic task")
+@click.option("--dry-run/--no-dry-run", default=True, help="Show prompt without running (default: True)")
+def test_agent(config, agent_name, task, dry_run):
+    """Debug agent prompts with a synthetic task."""
+    from joshua.config import load_config
+    from joshua.agents import agents_from_config
+
+    try:
+        cfg = load_config(config)
+    except Exception as e:
+        click.echo(friendly_error(e))
+        sys.exit(1)
+
+    agents = agents_from_config(cfg)
+    agent_map = {a.name: a for a in agents}
+
+    if not agent_name:
+        click.echo("\nAvailable agents:")
+        for name in agent_map:
+            click.echo(f"  - {name}")
+        agent_name = click.prompt("\nSelect agent")
+
+    if agent_name not in agent_map:
+        click.echo(f"Agent '{agent_name}' not found. Available: {list(agent_map.keys())}")
+        sys.exit(1)
+
+    agent = agent_map[agent_name]
+    system_prompt = getattr(agent, "instructions", "") or ""
+    skill = getattr(agent, "skill", "")
+
+    BLUE = "\033[94m"
+    GREEN = "\033[92m"
+    WHITE = "\033[0m"
+    RESET = "\033[0m"
+
+    click.echo(f"\n{BLUE}{'─'*50}")
+    click.echo(f"  SYSTEM PROMPT  ({agent_name} / skill:{skill})")
+    click.echo(f"{'─'*50}{RESET}")
+    click.echo(system_prompt or "(no instructions defined)")
+
+    click.echo(f"\n{GREEN}{'─'*50}")
+    click.echo("  TASK")
+    click.echo(f"{'─'*50}{RESET}")
+    click.echo(task)
+    click.echo("")
+
+    if dry_run:
+        click.echo("  [dry-run] Use --no-dry-run to execute the agent.")
+        return
+
+    # Execute real agent
+    click.echo(f"{WHITE}{'─'*50}")
+    click.echo("  OUTPUT")
+    click.echo(f"{'─'*50}{RESET}")
+    from joshua.runners import runner_factory
+    runner = runner_factory(cfg)
+    result = runner.run(agent, task, {})
+    click.echo(result.output if hasattr(result, "output") else str(result))
+
+
+# ── joshua tutorial ────────────────────────────────────────────────────────
+
+@main.command("tutorial")
+def tutorial():
+    """Interactive guided tutorial for your first sprint."""
+    click.echo("\n" + "═" * 50)
+    click.echo("  Welcome to joshua-agent!")
+    click.echo("  Autonomous multi-agent sprints that learn.")
+    click.echo("═" * 50)
+    click.echo("""
+  joshua runs a team of AI agents in continuous cycles:
+    • dev agents write code
+    • gate agents review and issue GO / CAUTION / REVERT
+    • the sprint auto-deploys on GO, auto-reverts on REVERT
+    • agents learn across cycles via a shared wiki
+""")
+    click.pause("  Press Enter to continue...")
+
+    click.echo("\n── Step 1: Create your config ──────────────────")
+    click.echo("  Run: joshua init")
+    click.echo("  This generates a joshua.yaml for your project.")
+    click.pause("  Press Enter to continue...")
+
+    click.echo("\n── Step 2: Check your environment ──────────────")
+    click.echo("  Run: joshua doctor")
+    click.echo("  Verifies agent binaries, tokens, and git access.")
+    click.pause("  Press Enter to continue...")
+
+    click.echo("\n── Step 3: Understand your config ──────────────")
+    click.echo("  Run: joshua explain joshua.yaml")
+    click.echo("  Explains each field in plain English.")
+    click.pause("  Press Enter to continue...")
+
+    click.echo("\n── Step 4: First sprint (simulated) ────────────")
+    click.echo("  Run: joshua run joshua.yaml --cycles 1 --dry-run")
+    click.echo("  Parses config and shows what would run.")
+    click.pause("  Press Enter to continue...")
+
+    click.echo("\n── Step 5: Server & dashboard ───────────────────")
+    click.echo("  Start server:  joshua serve --port 8100")
+    click.echo("  View status:   http://localhost:8100/dashboard")
+    click.echo("  API docs:      http://localhost:8100/docs")
+    click.pause("  Press Enter to continue...")
+
+    click.echo("\n── Step 6: Next steps ───────────────────────────")
+    click.echo("  • Add to CI:    see docs/ci.md")
+    click.echo("  • Slack alerts: configure notifications.slack in YAML")
+    click.echo("  • Auto-evolve:  joshua evolve joshua.yaml (daily cron)")
+    click.echo("  • Shell tab completion: joshua completion zsh")
+    click.echo("")
+    click.echo("  joshua --help   for all commands")
+    click.echo("  joshua tips     for quick tips")
+    click.echo("")
+    click.echo("  Shall we play a game? 🎮")
+    click.echo("")
+
+
+# ── joshua completion ──────────────────────────────────────────────────────
+
+@main.command("completion")
+@click.argument("shell", type=click.Choice(["bash", "zsh", "fish"]), default="zsh")
+def completion(shell):
+    """Print shell completion script. Add to your shell profile."""
+    instructions = {
+        "bash": (
+            'eval "$(_JOSHUA_COMPLETE=bash_source joshua)"\n\n'
+            "# Add to ~/.bashrc:\n"
+            'echo \'eval "$(_JOSHUA_COMPLETE=bash_source joshua)"\' >> ~/.bashrc'
+        ),
+        "zsh": (
+            'eval "$(_JOSHUA_COMPLETE=zsh_source joshua)"\n\n'
+            "# Add to ~/.zshrc:\n"
+            'echo \'eval "$(_JOSHUA_COMPLETE=zsh_source joshua)"\' >> ~/.zshrc'
+        ),
+        "fish": (
+            "_JOSHUA_COMPLETE=fish_source joshua | source\n\n"
+            "# Add to ~/.config/fish/config.fish:\n"
+            "echo '_JOSHUA_COMPLETE=fish_source joshua | source' >> ~/.config/fish/config.fish"
+        ),
+    }
+    click.echo(f"\n# Joshua shell completion for {shell}")
+    click.echo(f"# _JOSHUA_COMPLETE env var triggers click completion\n")
+    click.echo(instructions[shell])
+    click.echo("")
+
+
+# ── joshua tips ────────────────────────────────────────────────────────────
+
+TIPS = [
+    "Use 'joshua watch' to re-run on file changes during development.",
+    "Gate agents see the last 10 lessons from your wiki. Keep it focused.",
+    "Set 'max_sprint_cost_usd' to avoid surprise bills during long sprints.",
+    "Use 'joshua bisect' to find exactly which commit broke your gate.",
+    "Add '.joshuaignore' to exclude files from agent context.",
+    "Run 'joshua bench config-a.yaml config-b.yaml' to compare LLM configs.",
+    "'joshua secure config.yaml' checks for hardcoded tokens before committing.",
+    "Use 'revert_requires_approval: true' for production gating with human oversight.",
+    "Set 'notifications.slack' to get Slack alerts on REVERT verdicts.",
+    "joshua explain config.yaml shows what each field does in plain English.",
+]
+
+
+@main.command("tips")
+def tips():
+    """Show a random joshua usage tip."""
+    import random
+    tip = random.choice(TIPS)
+    click.echo(f"\n💡 Tip: {tip}\n")
 
 
 if __name__ == "__main__":

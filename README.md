@@ -4,8 +4,8 @@
 
 | Signal | Status |
 | --- | --- |
-| Package | `1.10.0` |
-| Tests | `344 pytest tests`; CI runs on Python `3.11`, `3.12`, `3.13` |
+| Package | `1.11.0` |
+| Tests | `353 pytest tests`; CI runs on Python `3.11`, `3.12`, `3.13` |
 | Release path | GitHub Actions CI + PyPI publish workflow |
 
 ## Demo
@@ -667,6 +667,39 @@ joshua/
     ├── health.py       HTTP health checks
     ├── preflight.py    Disk, memory, Docker cleanup
     └── status.py       Dashboard
+```
+
+## Security
+
+joshua v1.11.0 adds security tooling:
+
+- **`joshua secure <config>`** — scan your YAML for hardcoded tokens, passwords, and API keys before committing. Detects Slack tokens, GitHub PATs, and generic secrets. Use `--fix` to get suggested `export` commands.
+- **Signed verdicts** — set `JOSHUA_SIGNING_KEY` to enable HMAC-SHA256 signatures on every row in `results.tsv`. Verify integrity with `joshua verify-audit <project_dir>`.
+- **Rate limiting** — server enforces 30 req/60s per token (configurable via `JOSHUA_RATE_LIMIT`). Explicit `check_rate_limit()` function available for per-endpoint use.
+
+```bash
+joshua secure my-project.yaml
+joshua secure my-project.yaml --fix
+JOSHUA_SIGNING_KEY=mysecret joshua run my-project.yaml
+joshua verify-audit .joshua/
+```
+
+## Shell Completion
+
+Enable tab completion for your shell:
+
+```bash
+# zsh
+echo 'eval "$(_JOSHUA_COMPLETE=zsh_source joshua)"' >> ~/.zshrc
+
+# bash
+echo 'eval "$(_JOSHUA_COMPLETE=bash_source joshua)"' >> ~/.bashrc
+
+# fish
+echo '_JOSHUA_COMPLETE=fish_source joshua | source' >> ~/.config/fish/config.fish
+
+# Or use the helper command:
+joshua completion zsh
 ```
 
 ## Documentation

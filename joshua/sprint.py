@@ -18,6 +18,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from joshua.agents import Agent, agents_from_config
+from joshua.utils.signing import sign_entry
 from joshua.config import load_config
 from joshua.runners import runner_factory
 from joshua.runners.base import LLMRunner, RunResult
@@ -818,10 +819,16 @@ class Sprint:
         write_header = not tsv_path.exists()
         mb = f"{metric_before}" if metric_before is not None else ""
         ma = f"{metric_after}" if metric_after is not None else ""
+        # HMAC signing (opt-in via JOSHUA_SIGNING_KEY)
+        signing_key = os.environ.get("JOSHUA_SIGNING_KEY", "")
+        timestamp = datetime.now().isoformat(timespec="seconds")
+        conf_str = str(confidence) if confidence is not None else ""
+        entry_str = f"{cycle}|{verdict}|{conf_str}|{timestamp}"
+        signature = sign_entry(entry_str, signing_key)
         with open(tsv_path, "a") as f:
             if write_header:
-                f.write("cycle\tverdict\tduration_s\tagents\tconfidence\tmetric_before\tmetric_after\tdescription\n")
-            f.write(f"{cycle}\t{verdict}\t{duration:.1f}\t{agents}\t{confidence}\t{mb}\t{ma}\t{description}\n")
+                f.write("cycle\tverdict\tduration_s\tagents\tconfidence\tmetric_before\tmetric_after\tdescription\ttimestamp\tsignature\n")
+            f.write(f"{cycle}\t{verdict}\t{duration:.1f}\t{agents}\t{confidence}\t{mb}\t{ma}\t{description}\t{timestamp}\t{signature}\n")
 
     def _write_cycle_event(self, cycle: int, verdict: str, agent_timings: dict, gate_findings: str):
         """Write structured JSON event for this cycle to .joshua/events/."""

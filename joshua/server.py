@@ -127,6 +127,23 @@ _rate_limit_state: dict[str, list[float]] = {}
 _RATE_LIMIT_WINDOW = 60  # seconds
 _RATE_LIMIT_MAX = int(os.environ.get("JOSHUA_RATE_LIMIT", "30"))  # requests per window
 
+# Named constants for explicit rate limiting (v1.11.0)
+_rate_limit: dict[str, list[float]] = _rate_limit_state  # alias
+RATE_LIMIT_MAX = 60    # requests (for explicit check_rate_limit)
+RATE_LIMIT_WINDOW = 60  # seconds
+
+
+def check_rate_limit(token_prefix: str) -> bool:
+    """Return True if allowed, False if rate limited."""
+    now = time.time()
+    window = _rate_limit.setdefault(token_prefix, [])
+    # purge old entries
+    _rate_limit[token_prefix] = [t for t in window if now - t < RATE_LIMIT_WINDOW]
+    if len(_rate_limit[token_prefix]) >= RATE_LIMIT_MAX:
+        return False
+    _rate_limit[token_prefix].append(now)
+    return True
+
 # Audit log
 _AUDIT_LOG_PATH = Path(os.environ.get("JOSHUA_AUDIT_LOG", ".joshua/audit.jsonl"))
 
