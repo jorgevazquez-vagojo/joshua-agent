@@ -54,6 +54,7 @@ class AgentConfig(BaseModel):
     instructions: str = ""
     task_source: Optional[str] = None  # "jira" | None — dynamic task fetching
     task_source_config: dict = Field(default_factory=dict)
+    model: str = ""  # per-agent model override (e.g. "claude-opus-4-5" for gate agent)
 
     @model_validator(mode="after")
     def skill_or_role(self) -> AgentConfig:

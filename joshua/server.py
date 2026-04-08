@@ -368,57 +368,143 @@ _UI_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="refresh" content="10">
 <title>Joshua Dashboard</title>
 <style>
+  * { box-sizing: border-box; }
   body { font-family: monospace; background: #0d1117; color: #e6edf3; padding: 2rem; margin: 0; }
-  h1 { color: #58a6ff; border-bottom: 1px solid #30363d; padding-bottom: .5rem; }
-  .card { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 1rem; margin: 1rem 0; }
+  h1 { color: #58a6ff; border-bottom: 1px solid #30363d; padding-bottom: .5rem; margin-bottom: 1rem; }
+  h2 { color: #e6edf3; margin: 0 0 .75rem 0; font-size: 1rem; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 1rem 1.25rem; margin: 1rem 0; }
   .go { color: #3fb950; } .caution { color: #d29922; } .revert { color: #f85149; }
   .running { color: #58a6ff; } .stopped { color: #8b949e; }
-  table { width: 100%; border-collapse: collapse; }
-  th { text-align: left; color: #8b949e; padding: .3rem .5rem; }
-  td { padding: .3rem .5rem; border-top: 1px solid #21262d; }
-  .badge { padding: .1rem .5rem; border-radius: 4px; font-size: .85em; }
-  .badge-go { background: #0f3722; color: #3fb950; }
-  .badge-caution { background: #2d1f00; color: #d29922; }
-  .badge-revert { background: #300e0e; color: #f85149; }
+  table { width: 100%; border-collapse: collapse; font-size: .9em; }
+  th { text-align: left; color: #8b949e; padding: .35rem .5rem; border-bottom: 1px solid #30363d; }
+  td { padding: .35rem .5rem; border-top: 1px solid #21262d; vertical-align: middle; }
+  .badge { display: inline-block; padding: .1rem .45rem; border-radius: 4px; font-size: .82em; font-weight: bold; }
+  .badge-GO { background: #0f3722; color: #3fb950; }
+  .badge-CAUTION { background: #2d1f00; color: #d29922; }
+  .badge-REVERT { background: #300e0e; color: #f85149; }
   .badge-running { background: #0c2d6b; color: #58a6ff; }
-  .stat { display: inline-block; margin-right: 2rem; }
-  .stat-val { font-size: 2rem; font-weight: bold; color: #58a6ff; }
-  .stat-lbl { color: #8b949e; font-size: .85em; }
-  footer { color: #8b949e; font-size: .8em; margin-top: 2rem; }
+  .badge-stopped,.badge-done { background: #21262d; color: #8b949e; }
+  .stats-row { display: flex; gap: 2rem; flex-wrap: wrap; }
+  .stat { min-width: 80px; }
+  .stat-val { font-size: 2rem; font-weight: bold; color: #58a6ff; line-height: 1; }
+  .stat-lbl { color: #8b949e; font-size: .82em; margin-top: .2rem; }
+  .trend { letter-spacing: .1em; font-size: 1.1em; }
+  .refresh-bar { color: #8b949e; font-size: .78em; margin-bottom: .5rem; }
+  footer { color: #8b949e; font-size: .8em; margin-top: 2rem; border-top: 1px solid #21262d; padding-top: 1rem; }
+  footer a { color: #58a6ff; text-decoration: none; }
+  .section-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  @media (max-width: 900px) { .section-grid { grid-template-columns: 1fr; } }
+  code { background: #21262d; padding: .1rem .3rem; border-radius: 3px; font-size: .88em; }
+  .empty-msg { color: #8b949e; font-style: italic; font-size: .9em; }
 </style>
 </head>
 <body>
 <h1>&#9881; Joshua Dashboard</h1>
-<div id="content">Loading...</div>
-<footer>Auto-refreshes every 10s &bull; <a href="/metrics" style="color:#58a6ff">Prometheus</a> &bull; <a href="/health" style="color:#58a6ff">Health</a></footer>
+<div class="refresh-bar" id="refresh-bar">Loading...</div>
+<div id="content"></div>
+<footer>
+  Auto-refreshes every 15s &bull;
+  <a href="/metrics">Prometheus</a> &bull;
+  <a href="/health">Health</a> &bull;
+  <a href="/docs">API Docs</a>
+</footer>
 <script>
+const VERDICT_ORDER = {GO:0, CAUTION:1, REVERT:2};
+
+function badge(v) {
+  const cls = 'badge-' + (v||'stopped').replace(/[^A-Z]/g,'') || 'badge-stopped';
+  return '<span class="badge ' + cls + '">' + (v||'—') + '</span>';
+}
+
+function trendBar(verdicts) {
+  if (!verdicts || !verdicts.length) return '<span class="empty-msg">no data</span>';
+  return verdicts.slice(-3).map(v => {
+    const m = {GO:'<span class="go">&#9679;</span>', CAUTION:'<span class="caution">&#9679;</span>', REVERT:'<span class="revert">&#9679;</span>'};
+    return m[v] || '<span style="color:#8b949e">&#9675;</span>';
+  }).join(' ');
+}
+
+function fmtTime(ts) {
+  if (!ts) return '—';
+  return ts.slice(0,19).replace('T',' ');
+}
+
+function uptime(s) {
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s/60) + 'm ' + (s%60) + 's';
+  return Math.floor(s/3600) + 'h ' + Math.floor((s%3600)/60) + 'm';
+}
+
 async function load() {
   try {
     const r = await fetch('/');
     const d = await r.json();
-    let html = '<div class="card">';
-    html += '<span class="stat"><div class="stat-val">' + d.sprints_running + '</div><div class="stat-lbl">Running</div></span>';
-    html += '<span class="stat"><div class="stat-val">' + d.sprints_total + '</div><div class="stat-lbl">Total</div></span>';
-    html += '<span class="stat"><div class="stat-val">' + d.uptime_s + 's</div><div class="stat-lbl">Uptime</div></span>';
-    html += '</div>';
+
+    let html = '<div class="card"><div class="stats-row">';
+    html += '<div class="stat"><div class="stat-val">' + d.sprints_running + '</div><div class="stat-lbl">Running</div></div>';
+    html += '<div class="stat"><div class="stat-val">' + d.sprints_total + '</div><div class="stat-lbl">Total</div></div>';
+    html += '<div class="stat"><div class="stat-val">' + uptime(d.uptime_s) + '</div><div class="stat-lbl">Uptime</div></div>';
+    html += '<div class="stat"><div class="stat-val" style="font-size:1.1rem;padding-top:.5rem">' + d.version + '</div><div class="stat-lbl">Version</div></div>';
+    html += '</div></div>';
+
+    // Active sprints table
+    html += '<div class="card"><h2>Active Sprints</h2>';
     if (d.running && d.running.length > 0) {
-      html += '<div class="card"><h2 style="margin-top:0;color:#e6edf3">Active Sprints</h2><table><tr><th>ID</th><th>Project</th><th>Cycle</th><th>Started</th></tr>';
+      html += '<table><tr><th>ID</th><th>Project</th><th>Status</th><th>Cycle</th><th>Last Verdict</th><th>Trend</th><th>Started</th></tr>';
       for (const s of d.running) {
-        html += '<tr><td><code>' + s.sprint_id + '</code></td><td>' + s.project + '</td><td>' + s.cycle + '</td><td>' + (s.started_at||'').slice(0,19).replace('T',' ') + '</td></tr>';
+        const trend = trendBar(s.recent_verdicts);
+        html += '<tr>';
+        html += '<td><code>' + s.sprint_id + '</code></td>';
+        html += '<td>' + s.project + '</td>';
+        html += '<td>' + badge('running') + '</td>';
+        html += '<td>' + (s.cycle||0) + '</td>';
+        html += '<td>' + badge(s.last_verdict||'') + '</td>';
+        html += '<td class="trend">' + trend + '</td>';
+        html += '<td>' + fmtTime(s.started_at) + '</td>';
+        html += '</tr>';
       }
-      html += '</table></div>';
+      html += '</table>';
     } else {
-      html += '<div class="card" style="color:#8b949e">No sprints currently running.</div>';
+      html += '<p class="empty-msg">No sprints currently running.</p>';
     }
+    html += '</div>';
+
+    // Recent comparisons section
+    html += '<div id="compare-section"></div>';
+
     document.getElementById('content').innerHTML = html;
+    document.getElementById('refresh-bar').textContent = 'Last updated: ' + new Date().toLocaleTimeString();
+
+    // Load compare history if available
+    loadCompareHistory();
   } catch(e) {
-    document.getElementById('content').innerHTML = '<div class="card" style="color:#f85149">Failed to load data: ' + e + '</div>';
+    document.getElementById('content').innerHTML = '<div class="card" style="color:#f85149">Failed to load: ' + e + '</div>';
+    document.getElementById('refresh-bar').textContent = 'Error — retrying in 15s';
   }
 }
+
+async function loadCompareHistory() {
+  try {
+    const r = await fetch('/compare-history');
+    if (!r.ok) return;
+    const rows = await r.json();
+    if (!rows || !rows.length) return;
+    let html = '<div class="card"><h2>Recent Comparisons</h2><table>';
+    html += '<tr><th>Time</th><th>Environments</th><th>Verdicts</th></tr>';
+    for (const row of rows.slice(0,5)) {
+      html += '<tr><td>' + fmtTime(row.ts) + '</td><td>' + (row.envs||[]).join(', ') + '</td>';
+      const vs = (row.verdicts||[]).map(v => badge(v)).join(' ');
+      html += '<td>' + vs + '</td></tr>';
+    }
+    html += '</table></div>';
+    document.getElementById('compare-section').innerHTML = html;
+  } catch(_) {}
+}
+
 load();
+setInterval(load, 15000);
 </script>
 </body>
 </html>"""
@@ -694,4 +780,64 @@ def get_audit_log(lines: int = Query(default=100, ge=1, le=5000)):
         return [_json.loads(line) for line in tail if line.strip()]
     except Exception as exc:
         log.warning(f"Failed to read audit log: {exc}")
+        return []
+
+
+# ── Webhook task injection ─────────────────────────────────────────────
+
+class WebhookTaskRequest(BaseModel):
+    sprint_id: str
+    task: str
+
+
+@app.post("/webhook/task", dependencies=[Depends(verify_token)])
+async def webhook_task(req: WebhookTaskRequest):
+    """Queue a task for a sprint via webhook (for CI/CD integration)."""
+    import json as _json
+    sprint = _db.get_sprint(req.sprint_id) if _db else None
+    if not sprint:
+        raise HTTPException(404, "Sprint not found")
+    config = sprint.get("config", {})
+    project_path = config.get("project", {}).get("path", "")
+    if not project_path:
+        raise HTTPException(400, "Sprint has no project path")
+    tasks_path = Path(project_path).expanduser() / ".joshua" / "webhook_tasks.json"
+    tasks_path.parent.mkdir(parents=True, exist_ok=True)
+    tasks: list = []
+    if tasks_path.exists():
+        try:
+            tasks = _json.loads(tasks_path.read_text())
+        except Exception:
+            tasks = []
+    tasks.append(req.task)
+    tasks_path.write_text(_json.dumps(tasks))
+    log.info(f"Webhook task queued for sprint {req.sprint_id}: {req.task[:80]}")
+    return {"queued": True, "queue_length": len(tasks)}
+
+
+# ── Compare history (for UI) ───────────────────────────────────────────
+
+_COMPARE_HISTORY_PATH = Path(os.environ.get("JOSHUA_COMPARE_HISTORY", ".joshua/compare_history.jsonl"))
+
+
+@app.get("/compare-history", include_in_schema=False)
+def compare_history(limit: int = Query(default=10, ge=1, le=100)):
+    """Return recent compare runs for the dashboard UI (no auth required)."""
+    import json as _json
+    history_path = _COMPARE_HISTORY_PATH
+    if not history_path.exists():
+        return []
+    try:
+        lines = history_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        rows = []
+        for line in reversed(lines[-limit:]):
+            line = line.strip()
+            if line:
+                try:
+                    rows.append(_json.loads(line))
+                except Exception:
+                    pass
+        return rows
+    except Exception as exc:
+        log.warning(f"Failed to read compare history: {exc}")
         return []

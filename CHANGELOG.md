@@ -2,6 +2,26 @@
 
 All notable changes to joshua-agent are documented here.
 
+## [1.5.0] — 2026-04-08
+
+### Added
+- **`joshua promote`**: promote environments in sequence (dev→pre→pro) after `compare` confirms all GO. Reads `checkpoint.json` verdicts per env, runs `project.deploy` in order, optionally runs a gate-only sprint cycle between each environment. `--dry-run` previews without deploying; `--force` skips inter-env gate verification.
+- **`joshua rollback`**: explicit git rollback for a specific environment. Reads `snapshot_sha` from `checkpoint.json` (falls back to `HEAD~1`). `--to REF` targets a specific git ref. `--dry-run` shows before/after SHA without touching the working tree.
+- **`compare --email`** (`-e`): send the Markdown comparison report directly to an email address using `JOSHUA_SMTP_*` env vars. Also appends each compare run to `.joshua/compare_history.jsonl` for dashboard history.
+- **`joshua diff`**: compare two cycles within the same sprint. Reads `cycles/cycle-NNNN.json` and `.md` for each cycle; shows verdict change, confidence delta, duration delta, and a gate findings diff. Defaults to comparing the last two cycles.
+- **`joshua skill list` / `joshua skill new`**: `skill` command group. `list` shows all 11 built-in skills plus any custom skills from `~/.joshua/skills/*.yaml`. `new` is an interactive wizard (name → description → system prompt) that saves a YAML skill file.
+- **`joshua schedule`**: simple scheduler. `--interval N` runs a blocking loop calling `joshua run` every N seconds (useful for containerized deployments). `--cron EXPR` prints the system crontab command. `--dry-run` shows next 5 run times.
+- **`joshua/integrations/status_checks.py`** (new): `GitHubStatusCheck` and `GitLabStatusCheck` post the sprint verdict as a commit status (success/failure) via the respective APIs. Configure via `status_check:` in sprint YAML (`type: github|gitlab`, `token`, `repo`/`project_id`, `sha`).
+- **`WebhookTaskSource`** (`task_source: webhook`): queue-based task source backed by `.joshua/webhook_tasks.json`. Tasks are pushed via the new `POST /webhook/task` API endpoint (auth required) and dequeued one per cycle. Enables CI/CD event-driven QA — a PR merge or deploy event pushes a task, the sprint picks it up on the next cycle.
+- **`POST /webhook/task`** (server): auth-required endpoint to queue a task for a running sprint by ID.
+- **`AgentConfig.model`** field: per-agent model override in YAML (`model: opus` on the gate agent, `model: sonnet` on work agents). Passed through to the runner config at cycle time.
+- **Improved `/ui` dashboard** (server): richer single-page dashboard — stats bar (version, uptime, sprints), active sprints table with last-3-verdict trend dots, and a "Recent Comparisons" section populated from `compare_history.jsonl`. Auto-refreshes every 15s.
+- **`GET /compare-history`** (server): public endpoint returning recent `joshua compare` runs from `compare_history.jsonl`.
+
+### Changed
+- `AgentConfig` gains `model: str = ""` field.
+- `task_source_factory` registers `"webhook"` source type.
+
 ## [1.4.0] — 2026-04-08
 
 ### Added

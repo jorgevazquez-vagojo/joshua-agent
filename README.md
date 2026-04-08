@@ -4,7 +4,7 @@
 
 | Signal | Status |
 | --- | --- |
-| Package | `1.4.0` |
+| Package | `1.5.0` |
 | Tests | `303 pytest tests`; CI runs on Python `3.11`, `3.12`, `3.13` |
 | Release path | GitHub Actions CI + PyPI publish workflow |
 
@@ -402,6 +402,8 @@ joshua replay config.yaml --cycle 7    # Re-run gate on saved cycle output (no w
 joshua export .joshua                   # Sprint report as Markdown (stdout)
 joshua export .joshua --format json     # Sprint report as JSON
 joshua export .joshua --cycles 5        # Last 5 cycles only
+joshua diff .joshua --cycle 3 --cycle 7 # Compare two cycles side by side (verdict, confidence, findings diff)
+joshua diff .joshua                     # Compare last two cycles
 joshua distill .joshua1 .joshua2        # Consolidate lessons across multiple sprints
 ```
 
@@ -414,6 +416,7 @@ joshua compare dev.yaml pre.yaml pro.yaml --run --parallel  # Run all envs concu
 joshua compare dev.yaml pre.yaml pro.yaml -f markdown       # GFM table (for reports, Jira, etc.)
 joshua compare dev.yaml pre.yaml pro.yaml -f json           # JSON output (for CI/dashboards)
 joshua compare dev.yaml pre.yaml pro.yaml -o report.md -f markdown  # Save to file
+joshua compare dev.yaml pre.yaml pro.yaml -f markdown -e client@example.com  # Email report
 ```
 
 `compare` reads `.joshua/checkpoint.json` and `.joshua/results.tsv` from each config's state directory and renders a side-by-side verdict matrix. The first environment is the **baseline** — regressions against it are flagged automatically.
@@ -452,11 +455,34 @@ Summary line logic:
 | Any REVERT | `→ REVERT in one or more environments — block promotion` |
 | Any CAUTION, no REVERT | `→ CAUTION in one or more environments — review before promoting` |
 
+### Release flow
+
+```bash
+joshua promote dev.yaml pre.yaml pro.yaml           # Promote all envs in sequence if all GO
+joshua promote dev.yaml pre.yaml pro.yaml --dry-run # Show what would be deployed
+joshua promote dev.yaml pre.yaml pro.yaml --force   # Skip gate verification between envs
+joshua rollback dev.yaml                            # Git rollback to last snapshot SHA
+joshua rollback dev.yaml --to HEAD~1                # Rollback to specific git ref
+joshua rollback dev.yaml --dry-run                  # Show before/after SHA without rolling back
+```
+
+### Skills
+
+```bash
+joshua skill list                       # List all built-in skills with descriptions
+joshua skill new                        # Interactive wizard to create a custom skill
+```
+
+Custom skills are saved to `~/.joshua/skills/<name>.yaml` and available in any config with `skill: <name>`.
+
 ### Automation
 
 ```bash
 joshua fleet fleet.yaml                 # Run multiple projects from a YAML list
 joshua fleet fleet.yaml --dry-run       # Preview without running
+joshua schedule config.yaml --interval 3600         # Run QA every 1 hour
+joshua schedule config.yaml --cron "0 8 * * 1-5"   # Print crontab command for 8am Mon-Fri
+joshua schedule config.yaml --dry-run               # Show next 5 run times
 joshua serve                            # Start HTTP control plane (default: 127.0.0.1:8100)
 joshua serve --cert-file c.pem --key-file k.pem  # HTTPS
 joshua evolve config.yaml              # Run evolution + wiki maintenance

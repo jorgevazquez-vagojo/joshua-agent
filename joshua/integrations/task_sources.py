@@ -348,6 +348,49 @@ class NullTaskSource(TaskSource):
         return False
 
 
+class WebhookTaskSource(TaskSource):
+    """Tasks delivered via HTTP POST and stored in .joshua/webhook_tasks.json.
+
+    Use with POST /webhook/task endpoint on the joshua server.
+    """
+
+    def __init__(self, config: dict):
+        self.project_dir = config.get("project_dir", "")
+        self.state_dir = config.get("state_dir", "")
+
+    def _tasks_path(self):
+        from pathlib import Path
+        if self.state_dir:
+            return Path(self.state_dir) / "webhook_tasks.json"
+        return Path(self.project_dir) / ".joshua" / "webhook_tasks.json"
+
+    def _load(self) -> list[str]:
+        p = self._tasks_path()
+        if not p.exists():
+            return []
+        try:
+            return json.loads(p.read_text())
+        except Exception:
+            return []
+
+    def _save(self, tasks: list[str]):
+        p = self._tasks_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(tasks))
+
+    def has_tasks(self) -> bool:
+        return len(self._load()) > 0
+
+    def get_task(self, agent_name: str, cycle: int) -> TaskFetchResult | None:
+        tasks = self._load()
+        if not tasks:
+            return None
+        task = tasks.pop(0)
+        self._save(tasks)
+        log.info(f"[{agent_name}] Webhook task dequeued: {task[:80]}")
+        return TaskFetchResult(task=task, source_id=f"webhook-cycle-{cycle}")
+
+
 def task_source_factory(source_type: str, config: dict) -> TaskSource:
     """Create a TaskSource from config."""
     if source_type == "jira":
@@ -356,4 +399,6 @@ def task_source_factory(source_type: str, config: dict) -> TaskSource:
         return GateTaskSource(config)
     if source_type == "github":
         return GitHubTaskSource(config)
+    if source_type == "webhook":
+        return WebhookTaskSource(config)
     return NullTaskSource()

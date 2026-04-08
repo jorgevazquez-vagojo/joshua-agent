@@ -1267,7 +1267,8 @@ def tutorial():
 @click.option("--format", "-f", "fmt", type=click.Choice(["table", "markdown", "json"]),
               default="table", help="Output format (default: table)")
 @click.option("--output", "-o", default="", help="Write report to file instead of stdout")
-def compare(configs: tuple, do_run: bool, parallel: bool, fmt: str, output: str):
+@click.option("--email", "-e", default="", help="Send Markdown report to this email address")
+def compare(configs: tuple, do_run: bool, parallel: bool, fmt: str, output: str, email: str):
     """Compare QA results across multiple environments side by side.
 
     Reads existing sprint results (or runs one fresh cycle with --run) for each
@@ -1477,6 +1478,525 @@ def compare(configs: tuple, do_run: bool, parallel: bool, fmt: str, output: str)
         click.echo(f"Report written to: {output}")
     else:
         click.echo(result)
+
+    # Append to compare history for the /ui dashboard
+    import os as _os
+    _history_path = Path(_os.environ.get("JOSHUA_COMPARE_HISTORY", ".joshua/compare_history.jsonl"))
+    try:
+        _history_path.parent.mkdir(parents=True, exist_ok=True)
+        _history_entry = _json.dumps({
+            "ts": _dt.now().isoformat(timespec="seconds"),
+            "envs": [r["env"] for r in rows],
+            "verdicts": [r.get("verdict", "—") for r in rows],
+            "fmt": fmt,
+        })
+        with open(_history_path, "a", encoding="utf-8") as _hf:
+            _hf.write(_history_entry + "\n")
+    except Exception:
+        pass
+
+    # Send report by email if requested
+    if email:
+        smtp_host = _os.environ.get("JOSHUA_SMTP_HOST", "")
+        if not smtp_host:
+            click.echo("Error: JOSHUA_SMTP_HOST is not set — cannot send email.", err=True)
+            sys.exit(1)
+        import os as _os2
+        from joshua.integrations.notifications import EmailNotifier
+        _report_text = result if fmt == "markdown" else (
+            "# Environment Comparison Report\n\n```\n" + result + "\n```"
+        )
+        _notifier = EmailNotifier({
+            "host": smtp_host,
+            "port": int(_os.environ.get("JOSHUA_SMTP_PORT", "587")),
+            "user": _os.environ.get("JOSHUA_SMTP_USER", ""),
+            "password": _os.environ.get("JOSHUA_SMTP_PASS", ""),
+            "to": email,
+            "tls": True,
+        })
+        try:
+            _notifier._send(_report_text)
+            click.echo(f"Report sent to {email}")
+        except Exception as _e:
+            click.echo(f"Error sending email: {_e}", err=True)
+            sys.exit(1)
+
+
+@main.command()
+@click.argument("configs", nargs=-1, type=click.Path(exists=True), required=True)
+@click.option("--dry-run", is_flag=True, help="Show what would happen without deploying")
+@click.option("--force", is_flag=True, help="Skip gate verification between environments")
+def promote(configs: tuple, dry_run: bool, force: bool):
+    """Promote environments in sequence (dev→pre→pro) after verifying gates.
+
+    Reads checkpoint.json from each config's .joshua/ state dir. If all envs
+    are GO, deploys each in sequence. Between each deploy, runs one gate-only
+    cycle on the next env to verify before promoting.
+
+    \b
+    Example:
+      joshua promote dev.yaml pre.yaml pro.yaml
+      joshua promote dev.yaml pre.yaml pro.yaml --dry-run
+      joshua promote dev.yaml pre.yaml pro.yaml --force
+    """
+    import json as _json
+    from joshua.config import load_config
+    from joshua.utils.safe_cmd import run_command
+
+    if not configs:
+        click.echo("Error: at least one config is required.", err=True)
+        sys.exit(1)
+
+    # Load all configs and check verdicts
+    env_data = []
+    for cfg_path in configs:
+        try:
+            cfg = load_config(cfg_path)
+        except Exception as e:
+            click.echo(f"Error loading {cfg_path}: {e}", err=True)
+            sys.exit(1)
+
+        state_dir = Path(cfg["project"]["path"]).expanduser() / ".joshua"
+        cp_path = state_dir / "checkpoint.json"
+        cp: dict = {}
+        if cp_path.exists():
+            try:
+                cp = _json.loads(cp_path.read_text())
+            except Exception:
+                pass
+
+        verdict = (cp.get("last_verdict") or "—").upper()
+        env_data.append({
+            "cfg_path": cfg_path,
+            "cfg": cfg,
+            "verdict": verdict,
+            "name": cfg.get("project", {}).get("name", Path(cfg_path).stem),
+        })
+
+    # Check all envs are GO (unless --force)
+    click.echo("")
+    click.echo("  Promotion plan:")
+    for i, env in enumerate(env_data):
+        symbol = "✓" if env["verdict"] == "GO" else "✗"
+        click.echo(f"  {i+1}. [{symbol}] {env['name']} — verdict: {env['verdict']}")
+    click.echo("")
+
+    if not force:
+        not_go = [e for e in env_data if e["verdict"] != "GO"]
+        if not_go:
+            names = ", ".join(e["name"] for e in not_go)
+            click.echo(f"  Warning: {names} is not GO. Use --force to promote anyway.")
+            sys.exit(1)
+
+    if dry_run:
+        click.echo("  [dry-run] Would deploy:")
+        for env in env_data:
+            deploy_cmd = env["cfg"].get("project", {}).get("deploy", "")
+            click.echo(f"    {env['name']}: {deploy_cmd or '(no deploy command)'}")
+        click.echo("")
+        return
+
+    # Deploy each env in sequence
+    for i, env in enumerate(env_data):
+        cfg = env["cfg"]
+        name = env["name"]
+        deploy_cmd = cfg.get("project", {}).get("deploy", "")
+        project_path = cfg["project"]["path"]
+
+        click.echo(f"  Deploying {name}...")
+        if deploy_cmd:
+            try:
+                run_command(
+                    cmd=deploy_cmd,
+                    cwd=project_path,
+                    allowed_paths=[project_path],
+                )
+                click.echo(f"  ✓ {name} deployed")
+            except Exception as e:
+                click.echo(f"  ✗ {name} deploy failed: {e}", err=True)
+                sys.exit(1)
+        else:
+            click.echo(f"  (no deploy command for {name})")
+
+        # Gate verification before the next env (unless --force or last env)
+        if not force and i < len(env_data) - 1:
+            next_env = env_data[i + 1]
+            click.echo(f"  Running gate check on {next_env['name']} before promoting...")
+            try:
+                from joshua.sprint import Sprint
+                gate_cfg = dict(next_env["cfg"])
+                gate_cfg.setdefault("sprint", {})["max_cycles"] = 1
+                sprint = Sprint(gate_cfg)
+                sprint.run()
+                # Re-read checkpoint to get new verdict
+                next_state_dir = Path(next_env["cfg"]["project"]["path"]).expanduser() / ".joshua"
+                next_cp_path = next_state_dir / "checkpoint.json"
+                next_cp: dict = {}
+                if next_cp_path.exists():
+                    try:
+                        next_cp = _json.loads(next_cp_path.read_text())
+                    except Exception:
+                        pass
+                gate_verdict = (next_cp.get("last_verdict") or "—").upper()
+                if gate_verdict not in ("GO", "CAUTION"):
+                    click.echo(f"  ✗ Gate check for {next_env['name']} returned {gate_verdict} — stopping promotion.")
+                    sys.exit(1)
+                click.echo(f"  ✓ Gate check passed: {gate_verdict}")
+            except Exception as e:
+                click.echo(f"  ✗ Gate check failed: {e}", err=True)
+                sys.exit(1)
+
+    click.echo("")
+    click.echo("  Promotion complete.")
+    click.echo("")
+
+
+@main.command()
+@click.argument("config", type=click.Path(exists=True))
+@click.option("--to", "ref", default="", help="Git ref to roll back to (e.g. HEAD~1, a1b2c3d)")
+@click.option("--dry-run", is_flag=True, help="Show what would happen without rolling back")
+def rollback(config: str, ref: str, dry_run: bool):
+    """Roll back a project to a previous git state.
+
+    Uses the snapshot SHA from checkpoint.json by default, or a specific ref
+    with --to.
+
+    \b
+    Example:
+      joshua rollback dev.yaml
+      joshua rollback dev.yaml --to HEAD~1
+      joshua rollback dev.yaml --dry-run
+    """
+    import json as _json
+    from joshua.config import load_config
+    from joshua.integrations.git import GitOps
+
+    cfg = load_config(config)
+    project_path = Path(cfg["project"]["path"]).expanduser()
+
+    state_dir = project_path / ".joshua"
+    cp_path = state_dir / "checkpoint.json"
+    cp: dict = {}
+    if cp_path.exists():
+        try:
+            cp = _json.loads(cp_path.read_text())
+        except Exception:
+            pass
+
+    git_ops = GitOps(str(project_path))
+    current_sha = git_ops.get_head_sha() or "unknown"
+
+    # Determine target ref
+    if ref:
+        target_ref = ref
+        source = f"--to {ref}"
+    elif cp.get("snapshot_sha"):
+        target_ref = cp["snapshot_sha"]
+        source = "checkpoint.json snapshot_sha"
+    else:
+        target_ref = "HEAD~1"
+        source = "HEAD~1 (no snapshot_sha in checkpoint — fallback)"
+        click.echo(f"  Warning: no snapshot_sha found in checkpoint.json — falling back to HEAD~1")
+
+    click.echo("")
+    click.echo(f"  Project:  {cfg['project']['name']}")
+    click.echo(f"  Current:  {current_sha[:12] if current_sha != 'unknown' else 'unknown'}")
+    click.echo(f"  Target:   {target_ref} (from {source})")
+
+    if dry_run:
+        click.echo("  [dry-run] Would run: git reset --hard " + target_ref)
+        click.echo("")
+        return
+
+    click.echo(f"  Rolling back...")
+    ok = git_ops.reset_hard(target_ref)
+    if ok:
+        after_sha = git_ops.get_head_sha() or "unknown"
+        click.echo(f"  ✓ Rolled back to {after_sha[:12] if after_sha != 'unknown' else 'unknown'}")
+    else:
+        click.echo(f"  ✗ Rollback failed. Check git status manually.", err=True)
+        sys.exit(1)
+    click.echo("")
+
+
+@main.command()
+@click.argument("state_dir", type=click.Path())
+@click.option("--cycle", "-c", "cycles", multiple=True, type=int,
+              help="Cycle numbers to compare (provide twice for two cycles, default: last two)")
+def diff(state_dir: str, cycles: tuple):
+    """Compare two cycles within the same sprint.
+
+    Reads cycle-NNNN.json and .md files from .joshua/cycles/.
+
+    \b
+    Example:
+      joshua diff .joshua --cycle 3 --cycle 7
+      joshua diff .joshua
+    """
+    import json as _json
+
+    cycles_dir = Path(state_dir) / "cycles"
+    if not cycles_dir.exists():
+        click.echo(f"Error: cycles directory not found: {cycles_dir}", err=True)
+        sys.exit(1)
+
+    # Discover available cycle files
+    cycle_files = sorted(cycles_dir.glob("cycle-*.json"))
+    if len(cycle_files) < 2:
+        click.echo("Error: need at least 2 cycles to compare.", err=True)
+        sys.exit(1)
+
+    available = []
+    for f in cycle_files:
+        try:
+            n = int(f.stem.split("-")[1])
+            available.append(n)
+        except (IndexError, ValueError):
+            pass
+    available.sort()
+
+    if len(cycles) >= 2:
+        cycle_a, cycle_b = cycles[0], cycles[1]
+    else:
+        cycle_a, cycle_b = available[-2], available[-1]
+
+    def read_cycle(n: int) -> dict:
+        json_path = cycles_dir / f"cycle-{n:04d}.json"
+        md_path = cycles_dir / f"cycle-{n:04d}.md"
+        data: dict = {"cycle": n, "raw": {}, "md": ""}
+        if json_path.exists():
+            try:
+                data["raw"] = _json.loads(json_path.read_text())
+            except Exception:
+                pass
+        if md_path.exists():
+            data["md"] = md_path.read_text(errors="replace")
+        return data
+
+    a = read_cycle(cycle_a)
+    b = read_cycle(cycle_b)
+
+    def extract_meta(data: dict) -> dict:
+        """Extract verdict, confidence, duration from the md content."""
+        md = data["md"]
+        meta = {"verdict": "—", "confidence": "—", "duration": "—", "findings": ""}
+        for line in md.splitlines():
+            ll = line.lower()
+            if "verdict" in ll and ":" in line:
+                meta["verdict"] = line.split(":", 1)[-1].strip()
+            elif "confidence" in ll and ":" in line:
+                meta["confidence"] = line.split(":", 1)[-1].strip()
+            elif "duration" in ll and ":" in line:
+                meta["duration"] = line.split(":", 1)[-1].strip()
+        # First 10 lines as findings
+        meta["findings"] = "\n".join(md.splitlines()[:10])
+        return meta
+
+    ma = extract_meta(a)
+    mb = extract_meta(b)
+
+    width = 36
+    click.echo("")
+    click.echo(f"  Sprint diff: cycle {cycle_a} vs cycle {cycle_b}")
+    click.echo(f"  {'─' * (width * 2 + 7)}")
+    click.echo(f"  {'Field':<14}  {'Cycle ' + str(cycle_a):<{width}}  {'Cycle ' + str(cycle_b):<{width}}")
+    click.echo(f"  {'─' * (width * 2 + 7)}")
+    click.echo(f"  {'Verdict':<14}  {ma['verdict']:<{width}}  {mb['verdict']:<{width}}")
+    click.echo(f"  {'Confidence':<14}  {ma['confidence']:<{width}}  {mb['confidence']:<{width}}")
+    click.echo(f"  {'Duration':<14}  {ma['duration']:<{width}}  {mb['duration']:<{width}}")
+    click.echo(f"  {'─' * (width * 2 + 7)}")
+    click.echo("")
+    click.echo(f"  Gate findings (first 10 lines each):")
+    click.echo(f"  {'─' * (width * 2 + 7)}")
+
+    lines_a = ma["findings"].splitlines()
+    lines_b = mb["findings"].splitlines()
+    max_lines = max(len(lines_a), len(lines_b), 1)
+    for i in range(max_lines):
+        la = lines_a[i] if i < len(lines_a) else ""
+        lb = lines_b[i] if i < len(lines_b) else ""
+        click.echo(f"  {la[:width]:<{width}}  │  {lb[:width]}")
+
+    click.echo("")
+
+
+@main.group()
+def skill():
+    """Manage joshua agent skills (built-in and custom).
+
+    \b
+    Example:
+      joshua skill list
+      joshua skill new
+    """
+    pass
+
+
+@skill.command("list")
+def skill_list():
+    """List all built-in joshua skills with descriptions."""
+    BUILTIN_SKILLS = [
+        ("dev",             "Full-stack developer — writes and refactors code"),
+        ("qa",              "QA engineer — reviews changes and issues verdicts"),
+        ("bug-hunter",      "Finds and reproduces bugs in code and tests"),
+        ("security",        "Security analyst — audits for vulnerabilities"),
+        ("perf",            "Performance engineer — profiles and optimizes code"),
+        ("pm",              "Product manager — reviews scope and priorities"),
+        ("tech-writer",     "Technical writer — improves docs and changelogs"),
+        ("cfo",             "CFO agent — reviews cost and financial impact"),
+        ("coo",             "COO agent — reviews operational readiness"),
+        ("compliance",      "Compliance officer — checks regulatory requirements"),
+        ("legal-analyst",   "Legal analyst — reviews contracts and terms"),
+    ]
+
+    # Also list custom skills from ~/.joshua/skills/
+    custom_skills = []
+    skills_dir = Path.home() / ".joshua" / "skills"
+    if skills_dir.exists():
+        import yaml as _yaml
+        for f in sorted(skills_dir.glob("*.yaml")):
+            try:
+                data = _yaml.safe_load(f.read_text())
+                custom_skills.append((data.get("name", f.stem), data.get("description", "")))
+            except Exception:
+                custom_skills.append((f.stem, "(custom skill)"))
+
+    click.echo("")
+    click.echo("  Built-in skills:")
+    click.echo(f"  {'─' * 58}")
+    click.echo(f"  {'Skill':<18}  Description")
+    click.echo(f"  {'─' * 58}")
+    for name, desc in BUILTIN_SKILLS:
+        click.echo(f"  {name:<18}  {desc}")
+
+    if custom_skills:
+        click.echo("")
+        click.echo("  Custom skills (~/.joshua/skills/):")
+        click.echo(f"  {'─' * 58}")
+        for name, desc in custom_skills:
+            click.echo(f"  {name:<18}  {desc}")
+
+    click.echo("")
+
+
+@skill.command("new")
+def skill_new():
+    """Interactive wizard to create a custom skill."""
+    click.echo("")
+    click.echo("  Create a new custom skill")
+    click.echo("  ─────────────────────────")
+
+    name = click.prompt("  Skill name (e.g. data-analyst)").strip()
+    if " " in name:
+        click.echo("Error: skill name must not contain spaces.", err=True)
+        sys.exit(1)
+
+    description = click.prompt("  One-line description").strip()
+
+    click.echo("  System prompt (describe role and behavior).")
+    click.echo("  Type your prompt. Enter a line with only 'END' when done.")
+    prompt_lines = []
+    while True:
+        line = click.prompt("", prompt_suffix="  > ", default="", show_default=False)
+        if line.strip() == "END":
+            break
+        prompt_lines.append(line)
+    system_prompt = "\n".join(prompt_lines)
+
+    skills_dir = Path.home() / ".joshua" / "skills"
+    skills_dir.mkdir(parents=True, exist_ok=True)
+    skill_path = skills_dir / f"{name}.yaml"
+
+    content = f"# Custom skill: {name}\nname: {name}\ndescription: {description}\nsystem_prompt: |\n"
+    for line in system_prompt.splitlines():
+        content += f"  {line}\n"
+    if not system_prompt.strip():
+        content += "  (no system prompt defined)\n"
+
+    skill_path.write_text(content, encoding="utf-8")
+    click.echo("")
+    click.echo(f"  Skill saved to {skill_path}")
+    click.echo(f"  Use it in your configs with: skill: {name}")
+    click.echo("")
+
+
+@main.command()
+@click.argument("config", type=click.Path(exists=True))
+@click.option("--cron", default="", help="Cron expression (informational — see --dry-run)")
+@click.option("--interval", default=0, type=int, help="Run every N seconds")
+@click.option("--max-cycles", "-n", default=1, help="Max cycles per run (default: 1)")
+@click.option("--dry-run", is_flag=True, help="Show next 5 run times and exit")
+def schedule(config: str, cron: str, interval: int, max_cycles: int, dry_run: bool):
+    """Schedule repeated joshua runs on a cron or interval basis.
+
+    Use --interval N to run every N seconds (blocking loop).
+    Use --cron to get the system cron command to use (--dry-run).
+
+    \b
+    Example:
+      joshua schedule config.yaml --interval 3600
+      joshua schedule config.yaml --cron "0 8 * * 1-5" --dry-run
+    """
+    import time as _time
+    import subprocess as _subprocess
+    from datetime import datetime as _datetime, timedelta as _timedelta
+
+    if not cron and not interval:
+        click.echo("Error: provide --cron or --interval.", err=True)
+        sys.exit(1)
+
+    if cron:
+        click.echo("")
+        click.echo(f"  Cron expression: {cron}")
+        click.echo(f"  Full cron parsing is not built-in. Add to your system crontab:")
+        click.echo(f"    {cron} joshua run {config} --max-cycles {max_cycles}")
+        click.echo("")
+        if dry_run:
+            click.echo("  Next 5 execution windows (approximate, based on interval heuristic):")
+            now = _datetime.now()
+            for i in range(1, 6):
+                click.echo(f"    {i}. (depends on cron schedule — use: crontab -e)")
+            click.echo("")
+        return
+
+    if dry_run:
+        click.echo("")
+        click.echo(f"  Would run every {interval}s:")
+        now = _datetime.now()
+        for i in range(1, 6):
+            t = now + _timedelta(seconds=interval * i)
+            click.echo(f"    {i}. {t.strftime('%Y-%m-%d %H:%M:%S')}")
+        click.echo("")
+        return
+
+    click.echo(f"  Scheduling: joshua run {config} every {interval}s (Ctrl+C to stop)")
+    click.echo("")
+
+    import signal as _signal
+    running = True
+
+    def _stop(sig, frame):
+        nonlocal running
+        running = False
+        click.echo("\n  Scheduler stopped.")
+
+    _signal.signal(_signal.SIGINT, _stop)
+    _signal.signal(_signal.SIGTERM, _stop)
+
+    run_count = 0
+    while running:
+        run_count += 1
+        click.echo(f"  [{_datetime.now().strftime('%H:%M:%S')}] Run #{run_count}...")
+        try:
+            _subprocess.run(
+                ["joshua", "run", config, "--max-cycles", str(max_cycles)],
+                check=False,
+            )
+        except Exception as e:
+            click.echo(f"  Warning: run failed: {e}")
+        if running:
+            click.echo(f"  Sleeping {interval}s until next run...")
+            _time.sleep(interval)
 
 
 if __name__ == "__main__":
