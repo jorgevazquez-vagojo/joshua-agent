@@ -392,6 +392,13 @@ joshua/
     └── status.py       Dashboard
 ```
 
+## Documentation
+
+| Doc | Description |
+|---|---|
+| [docs/ecommerce-qa.md](docs/ecommerce-qa.md) | E-commerce QA skills: researcher, magento-hunter, mobile-tester, ecommerce-qa |
+| [docs/primor-setup.md](docs/primor-setup.md) | Production setup guide for running QA sprints against primor.eu |
+
 ## Contributing
 
 Areas where help is needed:
