@@ -28,8 +28,18 @@ class RunResult:
     error_type: Optional[str] = None  # "timeout" | "binary_not_found" | "rate_limit" | "cancelled" | "error"
     metadata: dict = field(default_factory=dict)
 
+    tokens_out: int = 0  # estimated output tokens (len(output) // 4)
+
     def __bool__(self) -> bool:
         return self.success
+
+    def is_transient(self) -> bool:
+        """True for errors worth retrying (timeout, rate limit)."""
+        return self.error_type in ("timeout", "rate_limit")
+
+    def is_terminal(self) -> bool:
+        """True for errors that mean the runner can't work at all (binary missing, cancelled)."""
+        return self.error_type in ("binary_not_found", "cancelled")
 
     def truncated_output(self, max_chars: int = MAX_OUTPUT_CHARS) -> str:
         """Return output truncated to max_chars with a notice if truncated."""
@@ -216,6 +226,9 @@ class LLMRunner(ABC):
                 f"Runner output truncated from {len(result.output)} to {MAX_OUTPUT_CHARS} chars"
             )
             result.output = result.truncated_output()
+
+        # Estimate output tokens as proxy for cost tracking
+        result.tokens_out = len(result.output) // 4
 
         return result
 

@@ -93,6 +93,7 @@ def run_command(
     cancel_event=None,
     on_process_start=None,
     on_process_end=None,
+    allowed_paths: Optional[list] = None,
 ) -> tuple[bool, str]:
     """
     Run a deploy/revert command safely.
@@ -101,6 +102,7 @@ def run_command(
     - Allowlist on first token
     - Blocks shell metacharacters
     - Redacts secrets from logs
+    - allowed_paths: if set, script path (first token if a file) must be under one of these dirs
     - Returns (success, output)
     """
     try:
@@ -108,6 +110,30 @@ def run_command(
     except ValueError as e:
         log.error(f"Command rejected: {e}")
         return False, str(e)
+
+    # allowed_paths check: applies to script file paths in the command.
+    # Covers both:  ./deploy.sh  (first token is the file)
+    #              bash ./deploy.sh  (shell interpreter + script as second token)
+    if allowed_paths is not None:
+        first = os.path.basename(args[0])
+        # Determine which token holds the script path
+        if first in _SHELL_INTERPRETERS and len(args) > 1:
+            script_token = args[1]
+        elif args[0].startswith(("./", "/", "~/")):
+            script_token = args[0]
+        else:
+            script_token = None
+
+        if script_token and script_token.startswith(("./", "/", "~/", "../")):
+            resolved = os.path.realpath(os.path.expanduser(script_token))
+            allowed = any(
+                resolved.startswith(os.path.realpath(os.path.expanduser(p)))
+                for p in allowed_paths
+            )
+            if not allowed:
+                msg = f"path not inside the allowed path list: {resolved}"
+                log.error(f"Command rejected: {msg}")
+                return False, msg
 
     # Build environment: inherit from process but allow extension
     env = os.environ.copy()

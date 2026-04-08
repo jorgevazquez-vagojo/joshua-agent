@@ -174,5 +174,205 @@ def serve(host: str, port: int):
     uvicorn.run("joshua.server:app", host=host, port=port, log_level="info")
 
 
+@main.command()
+@click.option("--output", "-o", default="", help="Output YAML file path (default: <project-slug>.yaml)")
+def init(output: str):
+    """Interactive setup wizard — generate a joshua config for your project.
+
+    Example: joshua init
+    """
+    import re
+
+    click.echo("")
+    click.echo("  joshua-agent setup wizard")
+    click.echo("  ─────────────────────────")
+    click.echo("  Answer a few questions to generate your config file.")
+    click.echo("")
+
+    # ── Project ────────────────────────────────────────────────────────
+    project_name = click.prompt("Project name", default="my-project")
+    project_path = click.prompt(
+        "Project path (absolute or relative to current dir)",
+        default=".",
+    )
+    project_path = str(Path(project_path).expanduser().resolve())
+
+    site_url = click.prompt("Site URL for live tests (leave blank to skip)", default="")
+
+    # ── Runner ─────────────────────────────────────────────────────────
+    click.echo("")
+    click.echo("Runner options:")
+    click.echo("  1. claude  — Claude Code CLI (recommended)")
+    click.echo("  2. aider   — Aider")
+    click.echo("  3. codex   — OpenAI Codex CLI")
+    click.echo("  4. custom  — any CLI tool")
+    runner_choice = click.prompt("Runner", type=click.Choice(["1", "2", "3", "4"]), default="1")
+    runner_map = {"1": "claude", "2": "aider", "3": "codex", "4": "custom"}
+    runner_type = runner_map[runner_choice]
+
+    runner_model = ""
+    if runner_type == "claude":
+        runner_model = click.prompt(
+            "Model (leave blank for default claude-sonnet-4-5)",
+            default="",
+        )
+
+    custom_command = ""
+    if runner_type == "custom":
+        custom_command = click.prompt("Command template for custom runner")
+
+    timeout = click.prompt("Runner timeout in seconds", default=1800, type=int)
+
+    # ── Agents ─────────────────────────────────────────────────────────
+    click.echo("")
+    click.echo("Agents — every project needs at least one work agent and one gate agent.")
+    click.echo("Common skills: developer, bug-hunter, researcher, performance, security, gate")
+    click.echo("")
+
+    agents: dict = {}
+
+    # Work agent
+    work_name = click.prompt("Work agent name", default="dev")
+    work_skill = click.prompt(f"Skill for '{work_name}'", default="developer")
+    work_task = click.prompt(
+        f"Default task for '{work_name}'",
+        default="Identify and fix bugs, improve code quality, and implement small enhancements.",
+    )
+    agents[work_name] = {"skill": work_skill, "instructions": work_task}
+
+    add_second = click.confirm("Add a second work agent?", default=False)
+    if add_second:
+        w2_name = click.prompt("Second work agent name", default="qa")
+        w2_skill = click.prompt(f"Skill for '{w2_name}'", default="bug-hunter")
+        w2_task = click.prompt(
+            f"Default task for '{w2_name}'",
+            default="Find bugs, regressions, and edge cases. Write failing tests.",
+        )
+        agents[w2_name] = {"skill": w2_skill, "instructions": w2_task}
+
+    # Gate agent
+    gate_name = click.prompt("Gate agent name", default="gate")
+    gate_skill = click.prompt(f"Skill for '{gate_name}'", default="gate")
+    agents[gate_name] = {
+        "skill": gate_skill,
+        "instructions": (
+            "Review the changes made this cycle. "
+            "Return a JSON block with verdict (GO/CAUTION/REVERT), "
+            "severity, findings, and confidence."
+        ),
+    }
+
+    # ── Sprint settings ────────────────────────────────────────────────
+    click.echo("")
+    max_cycles = click.prompt("Max cycles per run (0 = infinite)", default=10, type=int)
+    max_hours = click.prompt("Max hours per run (0 = no limit)", default=2.0, type=float)
+    cycle_sleep = click.prompt("Seconds to sleep between cycles", default=60, type=int)
+
+    git_strategy = click.prompt(
+        "Git strategy",
+        type=click.Choice(["none", "snapshot", "hillclimb"]),
+        default="snapshot",
+    )
+
+    deploy_cmd = click.prompt(
+        "Deploy command on GO verdict (leave blank to skip)",
+        default="",
+    )
+    health_url = click.prompt(
+        "Health-check URL after deploy (leave blank to skip)",
+        default="",
+    )
+
+    # ── Notifications ─────────────────────────────────────────────────
+    click.echo("")
+    notif_choice = click.prompt(
+        "Notifications",
+        type=click.Choice(["none", "telegram", "slack", "discord", "webhook"]),
+        default="none",
+    )
+    notif_config: dict = {"type": notif_choice}
+    if notif_choice == "telegram":
+        notif_config["token"] = click.prompt("Telegram bot token")
+        notif_config["chat_id"] = click.prompt("Telegram chat_id")
+    elif notif_choice == "slack":
+        notif_config["webhook_url"] = click.prompt("Slack webhook URL")
+    elif notif_choice == "discord":
+        notif_config["webhook_url"] = click.prompt("Discord webhook URL")
+    elif notif_choice == "webhook":
+        notif_config["url"] = click.prompt("Webhook URL")
+
+    # ── Memory ────────────────────────────────────────────────────────
+    memory_enabled = click.confirm("Enable self-learning memory?", default=True)
+
+    # ── Assemble YAML ─────────────────────────────────────────────────
+    slug = re.sub(r"[^a-z0-9]+", "-", project_name.lower()).strip("-")
+    out_path = output or f"{slug}.yaml"
+
+    lines = [
+        f"# joshua-agent config — generated by `joshua init`",
+        f"",
+        f"project:",
+        f"  name: {project_name}",
+        f"  path: {project_path}",
+    ]
+    if deploy_cmd:
+        lines.append(f"  deploy: {deploy_cmd}")
+    if health_url:
+        lines.append(f"  health_url: {health_url}")
+    if site_url:
+        lines.append(f"  site_url: {site_url}")
+
+    lines += ["", "runner:", f"  type: {runner_type}"]
+    if runner_model:
+        lines.append(f"  model: {runner_model}")
+    if custom_command:
+        lines.append(f"  command: {custom_command}")
+    lines.append(f"  timeout: {timeout}")
+
+    lines += ["", "agents:"]
+    for aname, acfg in agents.items():
+        lines.append(f"  {aname}:")
+        lines.append(f"    skill: {acfg['skill']}")
+        # Wrap instructions as literal block scalar if multiline-ish
+        instr = acfg.get("instructions", "")
+        if instr:
+            lines.append(f"    instructions: >-")
+            lines.append(f"      {instr}")
+
+    lines += [
+        "",
+        "sprint:",
+        f"  max_cycles: {max_cycles}",
+        f"  max_hours: {max_hours}",
+        f"  cycle_sleep: {cycle_sleep}",
+        f"  git_strategy: {git_strategy}",
+    ]
+    if health_url:
+        lines.append("  health_check: true")
+
+    lines += [
+        "",
+        "memory:",
+        f"  enabled: {'true' if memory_enabled else 'false'}",
+    ]
+
+    if notif_choice != "none":
+        lines += ["", "notifications:"]
+        for k, v in notif_config.items():
+            lines.append(f"  {k}: {v}")
+
+    yaml_content = "\n".join(lines) + "\n"
+
+    Path(out_path).write_text(yaml_content)
+
+    click.echo("")
+    click.echo(f"  Config written to: {out_path}")
+    click.echo("")
+    click.echo("  Next steps:")
+    click.echo(f"    joshua run {out_path} --max-cycles 1 --dry-run   # validate")
+    click.echo(f"    joshua run {out_path}                             # start sprint")
+    click.echo("")
+
+
 if __name__ == "__main__":
     main()

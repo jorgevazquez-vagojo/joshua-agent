@@ -93,6 +93,7 @@ class MemoryConfig(BaseModel):
     enabled: bool = True
     state_dir: str = ""
     lessons_per_cycle: int = Field(default=3, ge=0, le=20)
+    max_lesson_age_cycles: int = Field(default=50, ge=5)
 
 
 class NotificationsConfig(BaseModel):

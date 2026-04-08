@@ -86,6 +86,7 @@ class Sprint:
         # Memory settings
         mem_conf = config.get("memory", {})
         self.memory_enabled = mem_conf.get("enabled", True)
+        self.max_lesson_age_cycles = mem_conf.get("max_lesson_age_cycles", 50)
         self.state_dir = Path(
             mem_conf.get("state_dir", os.path.join(self.project_dir, ".joshua"))
         )
@@ -102,7 +103,7 @@ class Sprint:
 
         # State
         self.cycle = self._load_checkpoint()
-        self.stats = {"go": 0, "caution": 0, "revert": 0, "errors": 0}
+        self.stats = {"go": 0, "caution": 0, "revert": 0, "errors": 0, "total_tokens": 0}
         self.cycle_summaries: list[dict] = []
         self.gate_blocked = False
         self.last_gate_findings = ""
@@ -125,7 +126,8 @@ class Sprint:
             agent_conf = agents_config.get(agent.name, {})
             if isinstance(agent_conf, dict) and agent_conf.get("task_source"):
                 source_type = agent_conf["task_source"]
-                source_config = agent_conf.get("task_source_config", {})
+                source_config = dict(agent_conf.get("task_source_config", {}))
+                source_config.setdefault("project_dir", self.project_dir)
                 agent.task_source = task_source_factory(source_type, source_config)
                 log.info(f"[{agent.name}] Task source bound: {source_type}")
 
@@ -451,6 +453,7 @@ class Sprint:
 
         # Phase 1: Run all work skills
         work_outputs = {}
+        cycle_tokens = 0
         for i, agent in enumerate(work_agents):
             # Stagger: wait between agents (skip before first)
             if i > 0:
@@ -458,6 +461,7 @@ class Sprint:
             task = agent.get_task(self.cycle)
             self.sprint_logger.info(f"[{agent.name}] ({agent.skill}) Task: {task[:80]}")
             result = self._run_agent_with_retry(agent, task, context)
+            cycle_tokens += result.tokens_out
             output = result.output if result.success else f"[FAILED] {result.error}"
             work_outputs[agent.name] = output
             self._record_result(agent, task, result)
@@ -498,6 +502,7 @@ class Sprint:
 
             self.sprint_logger.info(f"[{agent.name}] ({agent.skill}) Reviewing cycle {self.cycle}...")
             result = self._run_agent_with_retry(agent, gate_task, context)
+            cycle_tokens += result.tokens_out
             verdict = self._parse_verdict(result.output)
             self._record_result(agent, f"gate-cycle-{self.cycle}", result)
 
@@ -568,6 +573,9 @@ class Sprint:
         description = self.last_gate_findings[:120].replace("\t", " ").replace("\n", " ").strip()
         self._append_results_tsv(self.cycle, verdict, cycle_duration, agents_run, confidence, description,
                                  metric_before, metric_after)
+
+        # Accumulate token usage for cost estimation
+        self.stats["total_tokens"] = self.stats.get("total_tokens", 0) + cycle_tokens
 
         self._run_hooks("post_cycle", {"JOSHUA_VERDICT": verdict})
         return verdict
@@ -657,9 +665,33 @@ class Sprint:
 
     def _run_agent_with_retry(self, agent: Agent, task: str,
                                context: dict) -> RunResult:
-        """Run agent with configurable retries."""
+        """Run agent with transient/terminal error classification and configurable retries."""
         result = self._run_agent(agent, task, context)
-        if result.success or not self.retries:
+
+        if result.success:
+            return result
+
+        # Terminal errors: stop sprint immediately (binary missing, cancelled)
+        if result.is_terminal():
+            self.sprint_logger.error(
+                f"[{agent.name}] Terminal error ({result.error_type}): {result.error} — stopping sprint"
+            )
+            self._stop_requested = True
+            self._stop_event.set()
+            return result
+
+        # Transient errors: retry once with 30s backoff before counting as failure
+        if result.is_transient():
+            self.sprint_logger.warning(
+                f"[{agent.name}] Transient error ({result.error_type}) — retrying in 30s"
+            )
+            if not self._wait_or_stop(30):
+                result = self._run_agent(agent, task, context)
+                if result.success:
+                    return result
+
+        # Configured retries (applies to any remaining failure)
+        if not self.retries:
             return result
 
         for attempt in range(1, self.retries + 1):
@@ -683,7 +715,9 @@ class Sprint:
         """Run a single agent with full prompt construction."""
         ctx = dict(context)
         if self.memory_enabled:
-            ctx["memory"] = build_memory_prompt(agent.name, self.state_dir)
+            ctx["memory"] = build_memory_prompt(
+                agent.name, self.state_dir, self.cycle, self.max_lesson_age_cycles
+            )
             ctx["wiki"] = build_wiki_context(
                 self.project_name, task, str(self.state_dir / "wiki")
             )
@@ -895,6 +929,7 @@ class Sprint:
             "project": self.project_name,
             "gate_blocked": self.gate_blocked,
             "last_gate_findings": self.last_gate_findings,
+            "last_gate_severity": self.last_gate_severity,
             "consecutive_errors": self.consecutive_errors,
         }
         path = self.state_dir / "checkpoint.json"

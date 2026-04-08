@@ -2,6 +2,18 @@
 
 All notable changes to joshua-agent are documented here.
 
+## [0.7.0] — 2026-04-08
+
+### Added
+- **Real-time log streaming** (`GET /sprints/{id}/logs/stream`): SSE endpoint streams sprint logs live, replacing the need to poll `/logs`.
+- **Verdict history** (`GET /sprints/{id}/verdicts`): structured list of every cycle verdict parsed from `results.tsv`.
+- **Sprint report** (`GET /sprints/{id}/report`): aggregated summary with verdict counts, avg duration, worst cycle, trend (`improving`/`degrading`/`stable`), and cost estimate in USD.
+- **`GateTaskSource`**: dynamic task source (`task_source: gate`) that generates the next agent task from the last gate findings — prioritises REVERT/CAUTION issues automatically.
+- **Lesson expiry** (`memory.max_lesson_age_cycles`, default 50): stale lessons are filtered out of the memory prompt, keeping context clean over long runs.
+- **Token cost tracking**: `RunResult.tokens_out` estimated as `len(output) // 4`; accumulated per-cycle in `stats.total_tokens`; exposed in the sprint report with a USD estimate (Sonnet pricing: $3/MTok output).
+- **`allowed_paths`** in `run_command()`: restrict deploy/revert scripts to a declared path list; previously missing parameter that blocked related tests.
+- **Transient vs terminal error classification** (`RunResult.is_transient()` / `is_terminal()`): transient errors (timeout, rate-limit) trigger a 30 s backoff + one automatic retry; terminal errors (binary not found, cancellation) stop the sprint immediately.
+
 ## [0.6.1] — 2026-04-06
 
 ### Fixed

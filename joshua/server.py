@@ -8,7 +8,10 @@ The server is stateless — reads from DB, delegates to ProcessManager.
 
 from __future__ import annotations
 
+import asyncio
+import csv
 import ipaddress
+import io
 import logging
 import os
 import secrets
@@ -22,7 +25,7 @@ from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Depends, Header, Query, Request
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ValidationError, field_validator
 
 from joshua import __version__
@@ -349,3 +352,149 @@ def get_sprint_logs(sprint_id: str, lines: int = Query(default=100, ge=1, le=100
         lines=tail,
         total_lines=len(all_lines),
     )
+
+
+@app.get("/sprints/{sprint_id}/logs/stream", dependencies=[Depends(verify_token)])
+async def stream_sprint_logs(sprint_id: str):
+    """SSE stream of live sprint log — follows the log file like tail -f."""
+    log_file = SPRINT_LOG_DIR / f"sprint-{sprint_id}.log"
+    if not log_file.exists():
+        raise HTTPException(404, f"Log file not found for sprint {sprint_id}")
+
+    async def event_generator():
+        with open(log_file, encoding="utf-8", errors="replace") as f:
+            # Seek to end — only stream new lines
+            f.seek(0, 2)
+            while True:
+                row = _db.get_sprint(sprint_id) if _db else None
+                sprint_running = row and row["status"] == "running"
+                line = f.readline()
+                if line:
+                    safe = redact_secrets(line.rstrip("\n"))
+                    yield f"data: {safe}\n\n"
+                else:
+                    if not sprint_running:
+                        yield "event: done\ndata: sprint finished\n\n"
+                        break
+                    await asyncio.sleep(0.5)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/sprints/{sprint_id}/verdicts", dependencies=[Depends(verify_token)])
+def get_sprint_verdicts(sprint_id: str):
+    """Return structured verdict history from results.tsv."""
+    row = _db.get_sprint(sprint_id) if _db else None
+    if not row:
+        raise HTTPException(404, f"Sprint {sprint_id} not found")
+
+    # Derive state_dir from project path (default: <project_path>/.joshua)
+    config = row.get("config") or {}
+    project_path = config.get("project", {}).get("path", "")
+    state_dir_override = config.get("memory", {}).get("state_dir", "")
+    state_dir = Path(state_dir_override) if state_dir_override else Path(project_path) / ".joshua"
+    tsv_path = state_dir / "results.tsv"
+
+    if not tsv_path.exists():
+        return []
+
+    verdicts = []
+    try:
+        content = tsv_path.read_text(encoding="utf-8", errors="replace")
+        reader = csv.DictReader(io.StringIO(content), delimiter="\t")
+        for r in reader:
+            verdicts.append({
+                "cycle": int(r.get("cycle", 0)),
+                "verdict": r.get("verdict", ""),
+                "duration_s": float(r.get("duration_s", 0) or 0),
+                "agents": r.get("agents", ""),
+                "confidence": r.get("confidence", ""),
+                "metric_before": r.get("metric_before", ""),
+                "metric_after": r.get("metric_after", ""),
+                "description": r.get("description", ""),
+            })
+    except Exception as exc:
+        log.warning(f"Failed to parse results.tsv for sprint {sprint_id}: {exc}")
+        return []
+
+    return verdicts
+
+
+@app.get("/sprints/{sprint_id}/report", dependencies=[Depends(verify_token)])
+def get_sprint_report(sprint_id: str):
+    """Aggregated sprint report: verdict trend, avg duration, cost estimate."""
+    row = _db.get_sprint(sprint_id) if _db else None
+    if not row:
+        raise HTTPException(404, f"Sprint {sprint_id} not found")
+
+    config = row.get("config") or {}
+    project_path = config.get("project", {}).get("path", "")
+    state_dir_override = config.get("memory", {}).get("state_dir", "")
+    state_dir = Path(state_dir_override) if state_dir_override else Path(project_path) / ".joshua"
+    tsv_path = state_dir / "results.tsv"
+
+    verdicts_list: list[dict] = []
+    if tsv_path.exists():
+        try:
+            content = tsv_path.read_text(encoding="utf-8", errors="replace")
+            reader = csv.DictReader(io.StringIO(content), delimiter="\t")
+            for r in reader:
+                verdicts_list.append({
+                    "cycle": int(r.get("cycle", 0)),
+                    "verdict": r.get("verdict", "").upper(),
+                    "duration_s": float(r.get("duration_s", 0) or 0),
+                    "description": r.get("description", ""),
+                })
+        except Exception as exc:
+            log.warning(f"Failed to parse results.tsv for report {sprint_id}: {exc}")
+
+    total_cycles = len(verdicts_list)
+    verdict_counts: dict[str, int] = {"GO": 0, "CAUTION": 0, "REVERT": 0}
+    durations: list[float] = []
+    worst_cycle: dict | None = None
+
+    for v in verdicts_list:
+        verdict = v["verdict"]
+        verdict_counts[verdict] = verdict_counts.get(verdict, 0) + 1
+        if v["duration_s"]:
+            durations.append(v["duration_s"])
+        if verdict == "REVERT" and (
+            worst_cycle is None or v["cycle"] > worst_cycle["cycle"]
+        ):
+            worst_cycle = v
+
+    avg_duration = round(sum(durations) / len(durations), 1) if durations else 0
+
+    # Trend: "improving" if last 3 cycles are all GO, "degrading" if any REVERT, else "stable"
+    recent = [v["verdict"] for v in verdicts_list[-3:]]
+    if len(recent) == 3 and all(v == "GO" for v in recent):
+        trend = "improving"
+    elif any(v == "REVERT" for v in recent):
+        trend = "degrading"
+    else:
+        trend = "stable"
+
+    # Cost estimate — tokens_total from DB stats (Sonnet: $3/MTok output)
+    stats = row.get("stats") or {}
+    tokens_total = stats.get("total_tokens", 0)
+    cost_usd = round(tokens_total / 1_000_000 * 3.0, 4)
+
+    return {
+        "sprint_id": sprint_id,
+        "project": row["project"],
+        "status": row["status"],
+        "total_cycles": total_cycles,
+        "verdicts": verdict_counts,
+        "avg_duration_s": avg_duration,
+        "worst_cycle": worst_cycle,
+        "trend": trend,
+        "tokens_total": tokens_total,
+        "cost_estimate_usd": cost_usd,
+    }

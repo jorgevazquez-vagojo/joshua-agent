@@ -174,6 +174,89 @@ class JiraTaskSource(TaskSource):
         )
 
 
+class GateTaskSource(TaskSource):
+    """Generate tasks based on the last gate verdict from checkpoint.json.
+
+    When the previous gate verdict was REVERT or CAUTION, prioritizes the
+    top issue from gate findings. Falls back to a generic task otherwise.
+
+    Config:
+      project_dir: path to the project (injected automatically by sprint.py)
+      state_dir:   override for .joshua state directory (optional)
+      fallback_task: task to use when gate says GO (optional)
+    """
+
+    def __init__(self, config: dict):
+        self.project_dir = config.get("project_dir", "")
+        self.state_dir = config.get("state_dir", "")
+        self.fallback_task = config.get(
+            "fallback_task",
+            "Review the codebase and identify any quality, performance, or reliability improvements.",
+        )
+
+    def _checkpoint_path(self):
+        import os
+        if self.state_dir:
+            return os.path.join(self.state_dir, "checkpoint.json")
+        return os.path.join(self.project_dir, ".joshua", "checkpoint.json")
+
+    def _load_checkpoint(self) -> dict:
+        import os
+        path = self._checkpoint_path()
+        if not os.path.exists(path):
+            return {}
+        try:
+            return json.loads(open(path).read())
+        except Exception:
+            return {}
+
+    def get_task(self, agent_name: str, cycle: int) -> TaskFetchResult | None:
+        cp = self._load_checkpoint()
+        if not cp:
+            return None
+
+        severity = cp.get("last_gate_severity", "none")
+        findings = cp.get("last_gate_findings", "")
+        last_cycle = cp.get("cycle", 0)
+
+        # Only act on findings from the immediately preceding cycle
+        if last_cycle != cycle - 1:
+            return None
+
+        if severity in ("critical", "high") or not severity or severity == "none":
+            # Critical/high or no prior data → resolve top issue if findings exist
+            if findings and severity in ("critical", "high"):
+                # Extract first meaningful line as the top issue
+                top_issue = next(
+                    (ln.strip() for ln in findings.split("\n") if len(ln.strip()) > 20),
+                    findings[:200],
+                )
+                task = f"Resolve the following issue found in the previous gate review:\n\n{top_issue}"
+                log.info(f"[{agent_name}] GateTaskSource: severity={severity} → resolving top issue")
+                return TaskFetchResult(
+                    task=task,
+                    source_id=f"gate-cycle-{last_cycle}",
+                    metadata={"severity": severity, "gate_cycle": last_cycle},
+                )
+
+        if severity in ("medium", "low", "unknown"):
+            if findings:
+                top_issue = next(
+                    (ln.strip() for ln in findings.split("\n") if len(ln.strip()) > 20),
+                    findings[:200],
+                )
+                task = f"Address the following concern found in the previous gate review:\n\n{top_issue}"
+                log.info(f"[{agent_name}] GateTaskSource: severity={severity} → addressing concern")
+                return TaskFetchResult(
+                    task=task,
+                    source_id=f"gate-cycle-{last_cycle}",
+                    metadata={"severity": severity, "gate_cycle": last_cycle},
+                )
+
+        # GO verdict or no actionable findings → use fallback
+        return None
+
+
 class NullTaskSource(TaskSource):
     """No-op — always returns None (use static tasks)."""
 
@@ -188,4 +271,6 @@ def task_source_factory(source_type: str, config: dict) -> TaskSource:
     """Create a TaskSource from config."""
     if source_type == "jira":
         return JiraTaskSource(config)
+    if source_type == "gate":
+        return GateTaskSource(config)
     return NullTaskSource()

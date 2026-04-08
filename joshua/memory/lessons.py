@@ -74,16 +74,31 @@ def load_evolved_guidelines(agent_name: str, state_dir: Path) -> str:
     return ""
 
 
-def build_memory_prompt(agent_name: str, state_dir: Path) -> str:
-    """Build a memory context string from guidelines + recent lessons."""
+def build_memory_prompt(
+    agent_name: str,
+    state_dir: Path,
+    current_cycle: int = 0,
+    max_lesson_age_cycles: int = 50,
+) -> str:
+    """Build a memory context string from guidelines + recent lessons.
+
+    Lessons older than max_lesson_age_cycles cycles are excluded to avoid
+    polluting context with stale information.
+    """
     guidelines = load_evolved_guidelines(agent_name, state_dir)
 
-    # Recent lessons
+    # Recent lessons (filtered by age)
     path = state_dir / "memory" / f"{agent_name}.json"
     recent = ""
     if path.exists():
         try:
             lessons = json.loads(path.read_text())
+            # Filter out stale lessons when we know the current cycle
+            if current_cycle > 0 and max_lesson_age_cycles > 0:
+                lessons = [
+                    l for l in lessons
+                    if current_cycle - l.get("cycle", 0) <= max_lesson_age_cycles
+                ]
             items = []
             for lesson in lessons[-5:]:
                 errors = lesson.get("errors_found", [])[:3]
