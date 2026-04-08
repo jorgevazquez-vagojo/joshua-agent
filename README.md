@@ -4,7 +4,7 @@
 
 | Signal | Status |
 | --- | --- |
-| Package | `1.11.0` |
+| Package | `1.12.0` |
 | Tests | `353 pytest tests`; CI runs on Python `3.11`, `3.12`, `3.13` |
 | Release path | GitHub Actions CI + PyPI publish workflow |
 

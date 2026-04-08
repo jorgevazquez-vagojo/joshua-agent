@@ -34,6 +34,7 @@ class Agent:
     verdict_format: bool = False  # If True, expects GO/CAUTION/REVERT output
     run_when_blocked: bool = True  # If False, skipped when gate blocking is active
     task_source: object | None = None  # TaskSource hook — set by Sprint at init
+    backstory: str = ""  # Behavioral context injected into system prompt
 
     def build_system_prompt(self, context: dict) -> str:
         """Render the system prompt with project context.
@@ -52,6 +53,10 @@ class Agent:
         prompt = self.system_prompt_template
         for key, val in ctx.items():
             prompt = prompt.replace(f"{{{key}}}", str(val))
+
+        # Inject backstory at the top of the prompt if provided
+        if self.backstory:
+            prompt = f"Background: {self.backstory}\n\n{prompt}"
 
         return prompt
 
@@ -352,6 +357,7 @@ def agents_from_config(config: dict) -> list[Agent]:
             phase=phase,
             verdict_format=verdict_format,
             run_when_blocked=run_when_blocked,
+            backstory=agent_conf.get("backstory", ""),
         ))
 
     return agents

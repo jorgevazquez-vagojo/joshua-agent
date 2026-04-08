@@ -2,6 +2,17 @@
 
 All notable changes to joshua-agent are documented here.
 
+## [1.12.0] — 2026-04-08
+
+### Added
+- **Effort score (MEJORA 1a)**: gate agents now output `EFFORT: <1-5>` alongside the JSON verdict. Sprint parses it with `_parse_effort_score()`, stores it in `checkpoint.json` as `effort_score`, adds it as a column in `results.tsv`, and exposes it in `joshua status --json` and the server `GET /sprints/{id}` response.
+- **`joshua learn` (MEJORA 1b)**: new CLI subcommand that records a lesson from the last accepted CAUTION verdict. Reads `checkpoint.json`, validates `last_verdict == "CAUTION"`, auto-extracts lesson text from gate findings/issues (or accepts `--message`), and appends to `.joshua/wiki/lessons.json`.
+- **Agent backstory (MEJORA 2)**: `AgentConfig` and `Agent` now support a `backstory` field. When set, it is prepended to the system prompt as `Background: <backstory>`. Useful for giving agents persistent behavioral context across sprint cycles.
+- **`joshua watch` with rich TUI (MEJORA 3)**: new dedicated `watch` command with a live-refreshing dashboard. Uses `rich.live` for a full TUI panel (state, verdict, effort score, cost, tokens, memory, wiki). Falls back to plain text if rich is unavailable or `--no-tui` is passed.
+- **State machine (MEJORA 4)**: sprint now tracks explicit lifecycle states: `IDLE → RUNNING → GATING → REVERTING/PAUSED → DONE/ERROR`. State and `state_since` timestamp are persisted in `checkpoint.json`. `joshua status --json` exposes `state` and `state_since`. Server `SprintStatus` exposes `state` and `effort_score`.
+- **`joshua status` redesign**: command now accepts `project_dir` (default `.`) instead of raw `state_dir`. `--json` output includes `state`, `state_since`, `effort_score`, `cost_usd`, `total_tokens`. `--watch` flag removed — use `joshua watch` instead.
+- **`rich>=13.0`** added as a core dependency.
+
 ## [1.11.0] — 2026-04-08
 
 ### Added

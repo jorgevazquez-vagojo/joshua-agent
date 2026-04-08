@@ -277,6 +277,8 @@ class SprintStatus(BaseModel):
     last_verdict: str | None = None
     last_verdict_severity: str = "none"
     last_verdict_source: str = "none"
+    state: str = "IDLE"
+    effort_score: int = 0
 
 
 class StopResponse(BaseModel):
@@ -312,6 +314,8 @@ def _status_from_db(row: dict, pm: ProcessManager | None = None) -> SprintStatus
         last_verdict=row.get("last_verdict"),
         last_verdict_severity=row.get("last_verdict_severity", "none"),
         last_verdict_source=row.get("last_verdict_source", "none"),
+        state=row.get("state", "IDLE"),
+        effort_score=row.get("effort_score", 0),
     )
 
 

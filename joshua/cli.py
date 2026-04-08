@@ -161,47 +161,264 @@ def run(config: str, max_cycles: int, max_hours: float, dry_run: bool, no_deploy
 
 
 @main.command()
-@click.argument("state_dir", type=click.Path(), default=".joshua")
-@click.option("--watch", "-w", is_flag=True, help="Refresh dashboard continuously (Ctrl+C to stop)")
-@click.option("--interval", "-i", default=5, help="Refresh interval in seconds (default: 5, requires --watch)")
+@click.argument("project_dir", type=click.Path(), default=".")
 @click.option("--json", "as_json", is_flag=True, help="Output machine-readable JSON (for CI integration)")
 @click.option("--no-color", "no_color", is_flag=True, envvar="NO_COLOR", help="Disable ANSI colors")
-def status(state_dir: str, watch: bool, interval: int, as_json: bool, no_color: bool):
+def status(project_dir: str, as_json: bool, no_color: bool):
     """Show sprint status dashboard.
 
-    Example: joshua status .joshua
-             joshua status --watch --interval 3
+    Example: joshua status .
+             joshua status /path/to/project
              joshua status --json | jq .checkpoint.cycle
     """
     import json as _json
-    import time as _time
     from joshua.utils.status import get_status, format_status
 
-    state_path = Path(state_dir).expanduser().resolve()
+    project_path = Path(project_dir).expanduser().resolve()
+    state_path = project_path / ".joshua"
     if not state_path.exists():
-        click.echo(f"State directory not found: {state_path}")
-        click.echo("Run a sprint first, or specify the correct path.")
-        sys.exit(1)
+        # Fallback: maybe they passed the .joshua dir directly
+        if (project_path / "checkpoint.json").exists():
+            state_path = project_path
+        else:
+            click.echo(f"State directory not found: {state_path}")
+            click.echo("Run a sprint first, or specify the correct path.")
+            sys.exit(1)
+
+    st = get_status(state_path)
 
     if as_json:
-        st = get_status(state_path)
-        click.echo(_json.dumps(st, indent=2))
+        # Enrich with state and effort_score from checkpoint
+        cp = st.get("checkpoint", {})
+        output = {
+            "project": cp.get("project", ""),
+            "cycle": cp.get("cycle", 0),
+            "state": cp.get("state", "IDLE"),
+            "state_since": cp.get("state_since", ""),
+            "last_verdict": cp.get("last_verdict", ""),
+            "last_verdict_severity": cp.get("last_verdict_severity", "none"),
+            "effort_score": cp.get("effort_score", 0),
+            "cost_usd": cp.get("cost_usd", 0.0),
+            "total_tokens": cp.get("total_tokens", 0),
+            "stats": cp.get("stats", {}),
+            "checkpoint": cp,
+            "memory": st.get("memory", {}),
+            "wiki": st.get("wiki", {}),
+            "timestamp": st.get("timestamp", ""),
+        }
+        click.echo(_json.dumps(output, indent=2))
         return
 
-    if not watch:
-        st = get_status(state_path)
-        click.echo(format_status(st))
-        return
+    click.echo(format_status(st))
+
+
+@main.command()
+@click.argument("project_dir", type=click.Path(), default=".")
+@click.option("--interval", "-i", default=5, help="Refresh interval in seconds (default: 5)")
+@click.option("--tui/--no-tui", default=True, help="Use rich TUI dashboard (default: yes if rich available)")
+def watch(project_dir: str, interval: int, tui: bool):
+    """Live-refreshing sprint dashboard (Ctrl+C to stop).
+
+    Uses rich TUI if available, falls back to plain text.
+
+    Example: joshua watch .
+             joshua watch /path/to/project --interval 3
+             joshua watch . --no-tui
+    """
+    import json as _json
+    import time as _time
+    from joshua.utils.status import get_status
+
+    project_path = Path(project_dir).expanduser().resolve()
+    state_path = project_path / ".joshua"
+    if not state_path.exists():
+        if (project_path / "checkpoint.json").exists():
+            state_path = project_path
+        else:
+            click.echo(f"State directory not found: {state_path}")
+            click.echo("Run a sprint first, or specify the correct path.")
+            sys.exit(1)
+
+    # Try rich TUI
+    if tui:
+        try:
+            from rich.live import Live
+            from rich.table import Table
+            from rich.panel import Panel
+            from rich.layout import Layout
+            from rich.text import Text
+            from rich import box
+            import rich
+
+            def _make_dashboard(st: dict) -> Panel:
+                cp = st.get("checkpoint", {})
+                project = cp.get("project", "unknown")
+                cycle = cp.get("cycle", 0)
+                state = cp.get("state", "IDLE")
+                verdict = (cp.get("last_verdict") or "—").upper()
+                severity = cp.get("last_verdict_severity", "none")
+                effort = cp.get("effort_score", 0)
+                cost = cp.get("cost_usd", 0.0)
+                tokens = cp.get("total_tokens", 0)
+                stats = cp.get("stats", {})
+                findings = (cp.get("last_gate_findings") or "")[:120]
+                state_since = cp.get("state_since", "")
+
+                _STATE_COLOR = {
+                    "RUNNING": "green", "GATING": "yellow", "REVERTING": "red",
+                    "DONE": "blue", "ERROR": "red bold", "IDLE": "dim",
+                    "PAUSED": "magenta",
+                }
+                _VERDICT_COLOR = {"GO": "green", "CAUTION": "yellow", "REVERT": "red"}
+
+                table = Table(box=box.SIMPLE, show_header=False, padding=(0, 1))
+                table.add_column("Key", style="dim", width=20)
+                table.add_column("Value")
+
+                table.add_row("Project", f"[bold]{project}[/bold]")
+                table.add_row("Cycle", str(cycle))
+                state_color = _STATE_COLOR.get(state, "white")
+                table.add_row("State", f"[{state_color}]{state}[/{state_color}]")
+                if state_since:
+                    table.add_row("  since", state_since[:19])
+                v_color = _VERDICT_COLOR.get(verdict, "white")
+                table.add_row("Last verdict", f"[{v_color}]{verdict}[/{v_color}]  severity={severity}")
+                if effort:
+                    table.add_row("Effort score", f"{effort}/5")
+                table.add_row("GO / CAUTION / REVERT",
+                              f"[green]{stats.get('go', 0)}[/green] / "
+                              f"[yellow]{stats.get('caution', 0)}[/yellow] / "
+                              f"[red]{stats.get('revert', 0)}[/red]")
+                table.add_row("Cost USD", f"${cost:.4f}")
+                table.add_row("Tokens", f"{tokens:,}")
+                if findings:
+                    table.add_row("Findings", findings)
+
+                mem = st.get("memory", {})
+                if mem:
+                    mem_str = "  ".join(
+                        f"{a}:{info['lessons']}L" for a, info in sorted(mem.items())
+                    )
+                    table.add_row("Memory", mem_str)
+
+                wiki = st.get("wiki", {})
+                table.add_row("Wiki", f"{wiki.get('entries', 0)} entries")
+
+                title = f"[bold cyan]JOSHUA WATCH[/bold cyan]  [dim]{st.get('timestamp', '')}[/dim]"
+                return Panel(table, title=title, border_style="cyan")
+
+            with Live(refresh_per_second=1) as live:
+                while True:
+                    st = get_status(state_path)
+                    live.update(_make_dashboard(st))
+                    _time.sleep(interval)
+
+        except KeyboardInterrupt:
+            pass
+        except ImportError:
+            tui = False  # fall back to plain
+
+    if not tui:
+        from joshua.utils.status import format_status
+        try:
+            while True:
+                click.clear()
+                st = get_status(state_path)
+                click.echo(format_status(st))
+                click.echo(f"\n  Refreshing every {interval}s — Ctrl+C to stop")
+                _time.sleep(interval)
+        except KeyboardInterrupt:
+            pass
+
+
+@main.command()
+@click.argument("project_dir", type=click.Path(), default=".")
+@click.option("--message", "-m", default=None, help="Lesson message (auto-extracted from last CAUTION findings if omitted)")
+def learn(project_dir: str, message: str | None):
+    """Record a lesson from the last accepted CAUTION verdict.
+
+    Reads checkpoint.json to find the last CAUTION verdict and saves
+    the lesson to .joshua/wiki/lessons.json for future sprint cycles.
+
+    Example: joshua learn .
+             joshua learn /path/to/project --message "Always check for N+1 queries"
+    """
+    import json as _json
+    from datetime import datetime as _dt
+
+    project_path = Path(project_dir).expanduser().resolve()
+    state_path = project_path / ".joshua"
+    if not state_path.exists():
+        if (project_path / "checkpoint.json").exists():
+            state_path = project_path
+        else:
+            click.echo(f"State directory not found: {state_path}")
+            click.echo("Run a sprint first.")
+            sys.exit(1)
+
+    cp_path = state_path / "checkpoint.json"
+    if not cp_path.exists():
+        click.echo("No checkpoint.json found. Run a sprint first.")
+        sys.exit(1)
 
     try:
-        while True:
-            click.clear()
-            st = get_status(state_path)
-            click.echo(format_status(st))
-            click.echo(f"\n  Refreshing every {interval}s — Ctrl+C to stop")
-            _time.sleep(interval)
-    except KeyboardInterrupt:
-        pass
+        cp = _json.loads(cp_path.read_text())
+    except Exception as e:
+        click.echo(f"Error reading checkpoint: {e}")
+        sys.exit(1)
+
+    last_verdict = (cp.get("last_verdict") or "").upper()
+    if last_verdict != "CAUTION":
+        click.echo(f"Last verdict was '{last_verdict}', not CAUTION.")
+        click.echo("joshua learn only records lessons from accepted CAUTION verdicts.")
+        click.echo("Hint: run a sprint cycle that produces a CAUTION verdict first.")
+        sys.exit(1)
+
+    # Auto-extract message from findings if not provided
+    if not message:
+        findings = cp.get("last_gate_findings", "").strip()
+        issues = cp.get("last_gate_issues", [])
+        if issues and isinstance(issues, list):
+            message = "; ".join(str(i) for i in issues[:3])
+        elif findings:
+            message = findings[:200]
+        else:
+            click.echo("No findings available for auto-extraction. Use --message to specify a lesson.")
+            sys.exit(1)
+
+    cycle = cp.get("cycle", 0)
+    effort_score = cp.get("effort_score", 0)
+    project = cp.get("project", "")
+
+    lesson_entry = {
+        "cycle": cycle,
+        "lesson": message,
+        "source": "accepted_caution",
+        "effort_score": effort_score,
+        "project": project,
+        "recorded_at": _dt.now().isoformat(timespec="seconds"),
+    }
+
+    # Load existing lessons
+    wiki_dir = state_path / "wiki"
+    wiki_dir.mkdir(parents=True, exist_ok=True)
+    lessons_path = wiki_dir / "lessons.json"
+
+    lessons: list = []
+    if lessons_path.exists():
+        try:
+            lessons = _json.loads(lessons_path.read_text())
+            if not isinstance(lessons, list):
+                lessons = []
+        except Exception:
+            lessons = []
+
+    lessons.append(lesson_entry)
+    lessons_path.write_text(_json.dumps(lessons, indent=2))
+
+    click.echo(f"Lesson recorded (cycle {cycle}, effort {effort_score}/5):")
+    click.echo(f"  {message[:160]}")
+    click.echo(f"  Saved to: {lessons_path}")
 
 
 @main.command()

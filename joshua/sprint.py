@@ -143,9 +143,12 @@ class Sprint:
         self.last_gate_recommended_action: str = ""
         self.last_gate_confidence: float | None = None
         self.last_verdict_source: str = "none"  # "json" | "legacy" | "default"
+        self.last_effort_score: int = 0  # 1-5 effort score from gate
         self.consecutive_errors = 0
         self._triggered = False  # for on_demand mode
         self._go_streak = 0  # consecutive GO streak for adaptive sleep
+        self._sprint_state: str = "IDLE"  # state machine: IDLE|RUNNING|GATING|REVERTING|DONE|PAUSED|ERROR
+        self._sprint_state_since: str = datetime.now().isoformat()
 
         # Per-sprint logger — replaced by setup_sprint_logger() when run via server
         self.sprint_id: str = ""
@@ -327,6 +330,7 @@ class Sprint:
                 except Exception as e:
                     self.consecutive_errors += 1
                     self.stats["errors"] += 1
+                    self._set_state("ERROR")
                     self.sprint_logger.error(f"Cycle {self.cycle} error: {e}")
                     self.notifier.notify_event("crash",
                         f"Cycle {self.cycle} error: {str(e)[:200]}",
@@ -394,6 +398,7 @@ class Sprint:
         finally:
             self.runner.cancel()
             self._terminate_active_command()
+            self._set_state("DONE")
             self._save_checkpoint()
             if lock_fd is not None:
                 try:
@@ -444,6 +449,7 @@ class Sprint:
         log.info(f"{'='*60}")
         self.sprint_logger.info(f"CYCLE {self.cycle} — {datetime.now().isoformat(timespec='seconds')}")
         log.info(f"{'='*60}")
+        self._set_state("RUNNING")
 
         # Health check — only stop sprint after N consecutive failures
         if self.health_check_enabled and self.health_url:
@@ -563,6 +569,7 @@ class Sprint:
 
         # Phase 2: Gate skills review all work outputs
         verdict = "GO" if not gate_agents else "CAUTION"
+        self._set_state("GATING")
         for i, agent in enumerate(gate_agents):
             if i > 0 or work_outputs:
                 self._stagger_wait(agent.name)
@@ -609,12 +616,14 @@ class Sprint:
 
         if verdict == "REVERT":
             self.sprint_logger.warning("REVERT — changes will not be deployed")
+            self._set_state("REVERTING")
             if self.gate_blocking:
                 self.gate_blocked = True
 
             # Human-in-the-loop approval
             do_revert = True
             if self.revert_requires_approval:
+                self._set_state("PAUSED")
                 do_revert = self._wait_for_revert_approval()
 
             if do_revert:
@@ -825,10 +834,11 @@ class Sprint:
         conf_str = str(confidence) if confidence is not None else ""
         entry_str = f"{cycle}|{verdict}|{conf_str}|{timestamp}"
         signature = sign_entry(entry_str, signing_key)
+        effort = str(self.last_effort_score) if self.last_effort_score else ""
         with open(tsv_path, "a") as f:
             if write_header:
-                f.write("cycle\tverdict\tduration_s\tagents\tconfidence\tmetric_before\tmetric_after\tdescription\ttimestamp\tsignature\n")
-            f.write(f"{cycle}\t{verdict}\t{duration:.1f}\t{agents}\t{confidence}\t{mb}\t{ma}\t{description}\t{timestamp}\t{signature}\n")
+                f.write("cycle\tverdict\tduration_s\tagents\tconfidence\tmetric_before\tmetric_after\tdescription\ttimestamp\tsignature\teffort_score\n")
+            f.write(f"{cycle}\t{verdict}\t{duration:.1f}\t{agents}\t{confidence}\t{mb}\t{ma}\t{description}\t{timestamp}\t{signature}\t{effort}\n")
 
     def _write_cycle_event(self, cycle: int, verdict: str, agent_timings: dict, gate_findings: str):
         """Write structured JSON event for this cycle to .joshua/events/."""
@@ -1020,6 +1030,13 @@ class Sprint:
             ctx["external_context"] = ""
         return ctx
 
+    def _parse_effort_score(self, output: str) -> int:
+        """Parse EFFORT: <1-5> from gate output. Returns 0 if not found."""
+        match = re.search(r"EFFORT:\s*([1-5])", output, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+        return 0
+
     def _parse_verdict(self, output: str) -> str:
         """Parse gate agent verdict from output.
 
@@ -1032,6 +1049,7 @@ class Sprint:
 
         Sets self.last_verdict_source to "json" | "legacy" | "default"
         so callers and APIs can distinguish how the verdict was obtained.
+        Also sets self.last_effort_score from EFFORT: <1-5> in the output.
         """
         VALID = ("GO", "CAUTION", "REVERT")
 
@@ -1053,10 +1071,11 @@ class Sprint:
                     self.last_gate_recommended_action = gv.recommended_action
                     self.last_gate_confidence = gv.confidence
                     self.last_verdict_source = "json"
+                    self.last_effort_score = self._parse_effort_score(output)
                     self.sprint_logger.info(
                         f"Verdict: {gv.verdict} | source=json | "
                         f"severity={gv.severity} | issues={len(gv.issues)} | "
-                        f"confidence={gv.confidence}"
+                        f"confidence={gv.confidence} | effort={self.last_effort_score}"
                     )
                     return gv.verdict
                 except _PydanticValidationError as e:
@@ -1087,6 +1106,7 @@ class Sprint:
             self.last_gate_issues = []
             self.last_gate_recommended_action = ""
             self.last_verdict_source = "legacy"
+            self.last_effort_score = self._parse_effort_score(output)
             log.warning(
                 f"Verdict: {verdict} | source=legacy — gate agent should output JSON. "
                 "Update the gate skill prompt."
@@ -1099,6 +1119,7 @@ class Sprint:
         self.last_gate_issues = []
         self.last_gate_recommended_action = ""
         self.last_verdict_source = "default"
+        self.last_effort_score = self._parse_effort_score(output)
         log.warning(
             f"Could not parse verdict — defaulting to CAUTION. "
             f"Gate output (first 200 chars): {output[:200]!r}"
@@ -1221,6 +1242,11 @@ class Sprint:
         )
         log.info("Digest sent")
 
+    def _set_state(self, state: str) -> None:
+        """Update sprint state machine."""
+        self._sprint_state = state
+        self._sprint_state_since = datetime.now().isoformat()
+
     def _save_checkpoint(self):
         """Save sprint state for resume."""
         checkpoint = {
@@ -1236,6 +1262,10 @@ class Sprint:
             "consecutive_errors": self.consecutive_errors,
             "total_tokens": self.stats.get("total_tokens", 0),
             "cost_usd": self.stats.get("cost_usd", 0.0),
+            "effort_score": self.last_effort_score,
+            "state": self._sprint_state,
+            "state_since": self._sprint_state_since,
+            "max_cycles": self.max_cycles,
         }
         path = self.state_dir / "checkpoint.json"
         tmp = path.with_suffix(".tmp")

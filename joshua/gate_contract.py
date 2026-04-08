@@ -56,4 +56,11 @@ severity   : none | low | medium | high | critical
 findings   : 1-3 sentence narrative
 issues     : list of specific problems found (empty list if none)
 confidence : 0.0–1.0, your confidence in this verdict (optional)
+
+Also output EFFORT: <1-5> on a separate line where:
+1 = trivial (typos, formatting)
+2 = minor (small logic fix)
+3 = moderate (feature work, refactor)
+4 = significant (architecture change, multiple files)
+5 = major (core system rewrite, security critical)
 """
