@@ -108,6 +108,7 @@ class Sprint:
         # REVERT approval
         self.revert_requires_approval = sprint_conf.get("revert_requires_approval", False)
         self.approval_timeout_minutes = sprint_conf.get("approval_timeout_minutes", 30)
+        self.confidence_threshold: float | None = sprint_conf.get("confidence_threshold", None)
 
         # Cost control
         runner_conf = config.get("runner", {})
@@ -659,6 +660,20 @@ class Sprint:
             result = self._run_agent_with_retry(agent, gate_task, context)
             cycle_tokens += result.tokens_out
             verdict = self._parse_verdict(result.output)
+
+            # Confidence threshold: downgrade GO→CAUTION if gate is uncertain
+            if (
+                verdict == "GO"
+                and self.confidence_threshold is not None
+                and self.last_gate_confidence is not None
+                and self.last_gate_confidence < self.confidence_threshold
+            ):
+                self.sprint_logger.warning(
+                    f"Gate confidence {self.last_gate_confidence:.2f} < threshold "
+                    f"{self.confidence_threshold:.2f} — downgrading GO to CAUTION (human review required)"
+                )
+                verdict = "CAUTION"
+
             # v1.15.0: trace gate finish
             tracer.finish_gate(
                 result,

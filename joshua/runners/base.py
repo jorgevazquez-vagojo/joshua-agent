@@ -61,6 +61,16 @@ class LLMRunner(ABC):
     - Output truncation: outputs >50k chars are capped to avoid token limit issues
     """
 
+    # Env var prefixes/names always passed through in sandbox mode
+    _SANDBOX_PASSTHROUGH = frozenset({
+        "PATH", "HOME", "USER", "SHELL", "LANG", "TERM", "TMPDIR", "TMP", "TEMP",
+        "XDG_RUNTIME_DIR",
+        # LLM API keys — the runner itself needs these
+        "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CLAUDE_API_KEY",
+        "OPENAI_BASE_URL", "ANTHROPIC_BASE_URL",
+    })
+    _SANDBOX_PASSTHROUGH_PREFIXES = ("LC_", "CLAUDE_", "AIDER_", "CODEX_")
+
     def __init__(self, config: dict):
         self.config = config
         self.timeout = config.get("timeout", 1800)
@@ -69,6 +79,8 @@ class LLMRunner(ABC):
         self._active_process: subprocess.Popen[str] | None = None
         self._process_lock = threading.Lock()
         self._cancel_requested = False
+        self._sandbox: bool = config.get("sandbox", False)
+        self._sandbox_allow_env: list[str] = config.get("sandbox_allow_env", [])
 
     def _rate_limit(self):
         """Block until rate limit allows next request."""
@@ -81,6 +93,28 @@ class LLMRunner(ABC):
             log.debug(f"Rate limit: waiting {wait:.1f}s (limit: {self._rpm} rpm)")
             time.sleep(wait)
         self._last_request_time = time.monotonic()
+
+    def _build_env(self) -> dict[str, str] | None:
+        """Return a filtered env dict for subprocesses, or None to inherit everything.
+
+        When sandbox=True, only LLM API keys, PATH/HOME and locale vars are passed through.
+        This prevents project secrets (DB URLs, cloud credentials, tokens) from leaking
+        into agent processes that have access to the project filesystem.
+        """
+        if not self._sandbox:
+            return None  # inherit full environment (default behaviour)
+
+        env: dict[str, str] = {}
+        for key, val in os.environ.items():
+            if (
+                key in self._SANDBOX_PASSTHROUGH
+                or any(key.startswith(p) for p in self._SANDBOX_PASSTHROUGH_PREFIXES)
+                or key in self._sandbox_allow_env
+            ):
+                env[key] = val
+
+        log.debug(f"sandbox=true: passing {len(env)} env vars to agent subprocess")
+        return env
 
     def cancel(self):
         """Cancel the currently running subprocess, if any."""
@@ -148,6 +182,7 @@ class LLMRunner(ABC):
                 stderr=subprocess.PIPE,
                 text=True,
                 cwd=cwd,
+                env=self._build_env(),
                 start_new_session=(os.name != "nt"),
             )
         except FileNotFoundError:

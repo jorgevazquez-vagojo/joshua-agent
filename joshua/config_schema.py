@@ -55,6 +55,14 @@ class RunnerConfig(BaseModel):
     max_daily_cost_usd: float = Field(default=0.0, ge=0)
     max_sprint_cost_usd: float = Field(default=0.0, ge=0)
     cost_alert_threshold: float = Field(default=0.80, ge=0, le=1)
+    sandbox: bool = Field(
+        default=False,
+        description="Strip project secrets from agent subprocess env (keeps PATH, HOME, LLM API keys only)",
+    )
+    sandbox_allow_env: list[str] = Field(
+        default_factory=list,
+        description="Extra env var names to pass through when sandbox=true",
+    )
 
     @model_validator(mode="after")
     def custom_requires_command(self) -> RunnerConfig:
@@ -128,6 +136,10 @@ class SprintConfig(BaseModel):
     parallel_agents: bool = False  # run work agents concurrently (gate remains sequential)
     revert_requires_approval: bool = Field(default=False)
     approval_timeout_minutes: int = Field(default=30, ge=1)
+    confidence_threshold: Optional[float] = Field(
+        default=None, ge=0.0, le=1.0,
+        description="If gate confidence < this value, GO is downgraded to CAUTION (human review required).",
+    )
 
     @field_validator("recovery_deploy", mode="before")
     @classmethod

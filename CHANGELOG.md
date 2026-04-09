@@ -2,6 +2,13 @@
 
 All notable changes to joshua-agent are documented here.
 
+## [1.16.0] — 2026-04-09
+
+### Added
+- **Confidence threshold** (`sprint.confidence_threshold`): set a float (0.0–1.0) in your sprint config to automatically downgrade a GO verdict to CAUTION whenever the gate's self-reported confidence falls below the threshold. Prevents silent auto-deploys when the gate is uncertain. Logged clearly: `"Gate confidence 0.62 < threshold 0.80 — downgrading GO to CAUTION (human review required)"`.
+- **Sandbox mode** (`runner.sandbox: true`): strips project secrets from agent subprocess environments. When enabled, agent processes only receive `PATH`, `HOME`, LLM API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`), locale vars, and an optional `sandbox_allow_env` list. Cloud credentials, database URLs, and other infra secrets in the host environment are not forwarded to the LLM agent process.
+- **`runner.sandbox_allow_env`**: list of additional env var names to pass through in sandbox mode (e.g. `[REDIS_URL, SENTRY_DSN]` for agents that legitimately need them).
+
 ## [1.15.0] — 2026-04-08
 
 ### Added
